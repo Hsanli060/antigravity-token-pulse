@@ -197,8 +197,8 @@ if (!srcLegendEl)
 return;
 if (activityBreakdownMode === 'source') {
 srcLegendEl.innerHTML = `
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:#D965B5;"></span>Desktop</span>
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:#60A5FA;"></span>CLI</span>
+<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop</span>
+<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI</span>
 `;
 }
 else {
@@ -400,7 +400,7 @@ if (modelEntries.length === 0) {
 modelPanelHtml = `
 <div class="agy-ta-panel" style="margin-top:10px;">
 <div class="agy-ta-panel-title">各模型累计消耗分布</div>
-<div style="color:#7E7E8E;font-size:11.5px;padding:8px 0;text-align:center;">暂无模型消耗明细记录</div>
+<div style="color:var(--agy-ta-muted, #7E7E8E);font-size:11.5px;padding:8px 0;text-align:center;">暂无模型消耗明细记录</div>
 </div>
 `;
 }
@@ -457,7 +457,7 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allIn)} (${inPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${inPct.toFixed(2)}%; background:#A78BFA;"></div>
+<div class="agy-ta-comp-fill" style="width:${inPct.toFixed(2)}%; background:var(--agy-ta-tok-in, #A78BFA);"></div>
 </div>
 </div>
 <div class="agy-ta-comp-item">
@@ -466,7 +466,7 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allCache)} (${cacheCompPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${cacheCompPct.toFixed(2)}%; background:#D965B5;"></div>
+<div class="agy-ta-comp-fill" style="width:${cacheCompPct.toFixed(2)}%; background:var(--agy-ta-desktop-color, #D965B5);"></div>
 </div>
 </div>
 <div class="agy-ta-comp-item">
@@ -475,7 +475,7 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allOut)} (${outPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${outPct.toFixed(2)}%; background:#34D399;"></div>
+<div class="agy-ta-comp-fill" style="width:${outPct.toFixed(2)}%; background:var(--agy-ta-tok-out, #34D399);"></div>
 </div>
 </div>
 </div>
@@ -489,17 +489,17 @@ listEl.innerHTML = `
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:#D965B5;"></span>Desktop (Antigravity 2.0)</span>
+<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop (Antigravity 2.0)</span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allDesktop)} (${desktopPct.toFixed(1)}%)</span>
 </div>
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:#60A5FA;"></span>CLI (agy)</span>
+<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI (agy)</span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allCli)} (${cliPct.toFixed(1)}%)</span>
 </div>
 </div>
-<div class="agy-ta-row-sub" style="margin-top:auto;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06);">
+<div class="agy-ta-row-sub" style="margin-top:auto;padding-top:4px;border-top:1px solid var(--agy-ta-divider, rgba(255,255,255,0.06));">
 <span>累计：${escHtml(convText)}</span>
 <span>平均缓存率 ${calcCachePct(all)}%</span>
 </div>
@@ -534,11 +534,14 @@ setRoleText('kpi-month-val', formatActivityTokens(thisMonth.total));
 setRoleText('kpi-month-sub', `活跃 ${Number(thisMonth.activeDays) || 0} 天 · Desktop ${formatActivityTokens(thisMonth.desktop)} / CLI ${formatActivityTokens(thisMonth.cli)}`);
 setRoleText('kpi-all-val', formatActivityTokens(allTime.total));
 setRoleText('kpi-all-sub', `共 ${Number(allTime.activeDays) || 0} 活跃天 · 缓存率 ${calcCachePct(allTime)}%`);
+const light = isLightTheme();
+activityOverlayEl.classList.toggle(LIGHT_MODAL_CLASS, light);
+activityOverlayEl.setAttribute('data-agy-theme', light ? 'light' : 'dark');
 const cells = activityOverlayEl.querySelectorAll('.agy-ta-cell[data-date]');
 for (const cell of cells) {
 const dateStr = cell.getAttribute('data-date');
 const day = getDayData(stats, dateStr);
-cell.style.background = getHeatmapColor(day.total);
+cell.style.background = getHeatmapColor(day.total, light);
 }
 if (activityHoveredDate && activityHoveredCell) {
 showActivityTooltip(activityHoveredCell, activityHoveredDate);
@@ -554,6 +557,9 @@ if (!activityModalOpen)
 return;
 const seq = ++activityFetchSeq;
 try {
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+throw new Error('ipcRenderer unavailable');
+}
 const raw = await electronObj.ipcRenderer.invoke('telemetry:get-activity-stats');
 if (!activityModalOpen || seq !== activityFetchSeq)
 return;
@@ -580,7 +586,7 @@ renderActivityModalData();
 }
 }
 function closeActivityModal() {
-if (!activityModalOpen)
+if (!activityModalOpen && !portalOverlaySignaled)
 return;
 activityModalOpen = false;
 activityHoveredDate = null;
@@ -590,7 +596,7 @@ if (activityRefreshTimer) {
 clearInterval(activityRefreshTimer);
 activityRefreshTimer = null;
 }
-if (activityEscapeHandler) {
+if (activityEscapeHandler && g.document && typeof g.document.removeEventListener === 'function') {
 g.document.removeEventListener('keydown', activityEscapeHandler, true);
 activityEscapeHandler = null;
 }
@@ -598,7 +604,33 @@ if (activityOverlayEl && activityOverlayEl.parentNode) {
 activityOverlayEl.parentNode.removeChild(activityOverlayEl);
 }
 activityOverlayEl = null;
-electronObj.ipcRenderer.invoke('wcv:set-portal-overlay-open', false).catch(() => { });
+if (portalOverlaySignaled) {
+portalOverlaySignaled = false;
+setPortalOverlayOpenSafe(false);
+}
+}
+function handleBeforeUnload() {
+try {
+if (activityModalOpen || portalOverlaySignaled) {
+activityModalOpen = false;
+activityHoveredDate = null;
+activityHoveredCell = null;
+activityRenderedTodayKey = null;
+if (activityRefreshTimer) {
+clearInterval(activityRefreshTimer);
+activityRefreshTimer = null;
+}
+if (activityEscapeHandler && g.document && typeof g.document.removeEventListener === 'function') {
+g.document.removeEventListener('keydown', activityEscapeHandler, true);
+activityEscapeHandler = null;
+}
+if (portalOverlaySignaled) {
+portalOverlaySignaled = false;
+setPortalOverlayOpenSafe(false);
+}
+}
+}
+catch { }
 }
 function openActivityModal() {
 if (activityModalOpen)
@@ -609,9 +641,13 @@ activityFetchError = false;
 activityHoveredDate = null;
 activityHoveredCell = null;
 activityRenderedTodayKey = null;
-electronObj.ipcRenderer.invoke('wcv:set-portal-overlay-open', true).catch(() => { });
+portalOverlaySignaled = true;
+setPortalOverlayOpenSafe(true);
+const light = isLightTheme();
 const overlay = g.document.createElement('div');
 overlay.id = MODAL_ID;
+overlay.classList.toggle(LIGHT_MODAL_CLASS, light);
+overlay.setAttribute('data-agy-theme', light ? 'light' : 'dark');
 overlay.innerHTML = `
 <div class="agy-ta-card" role="dialog" aria-modal="true" aria-label="Token 活动">
 <div class="agy-ta-header">
@@ -656,11 +692,11 @@ overlay.innerHTML = `
 <span class="agy-ta-section-title">近 53 周活动热力图</span>
 <span class="agy-ta-legend">
 <span>少</span>
-<span class="agy-ta-legend-sq" style="background:#2E2E38;"></span>
-<span class="agy-ta-legend-sq" style="background:#58294E;"></span>
-<span class="agy-ta-legend-sq" style="background:#843571;"></span>
-<span class="agy-ta-legend-sq" style="background:#BA4A98;"></span>
-<span class="agy-ta-legend-sq" style="background:#F6A5D8;"></span>
+<span class="agy-ta-legend-sq is-lv0"></span>
+<span class="agy-ta-legend-sq is-lv1"></span>
+<span class="agy-ta-legend-sq is-lv2"></span>
+<span class="agy-ta-legend-sq is-lv3"></span>
+<span class="agy-ta-legend-sq is-lv4"></span>
 <span>多</span>
 </span>
 </div>
@@ -676,8 +712,8 @@ overlay.innerHTML = `
 <span class="agy-ta-section-title" data-role="ta-bd-title">每日消耗明细</span>
 <div class="agy-ta-bd-controls" data-role="ta-bd-controls">
 <span class="agy-ta-src-legend" data-role="ta-src-legend">
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:#D965B5;"></span>Desktop</span>
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:#60A5FA;"></span>CLI</span>
+<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop</span>
+<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI</span>
 </span>
 <div class="agy-ta-mode-switch" data-role="ta-mode-switch">
 <button type="button" class="agy-ta-mode-btn" data-mode="source">端侧</button>

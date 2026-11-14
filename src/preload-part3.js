@@ -9,14 +9,88 @@ openActivityModal();
 }
 }
 const FIXED_MAX_TOKENS = 1000000; // 统一固定 1M 上下文窗口
+let lastAppliedLight = null;
+function applyThemeState(force) {
+const light = isLightTheme();
+const themeLabel = light ? 'light' : 'dark';
+const bars = g.document.querySelectorAll(`.${BAR_CLASS}`);
+for (const bar of bars) {
+bar.classList.toggle(LIGHT_BAR_CLASS, light);
+bar.setAttribute('data-agy-theme', themeLabel);
+}
+if (activityOverlayEl) {
+activityOverlayEl.classList.toggle(LIGHT_MODAL_CLASS, light);
+activityOverlayEl.setAttribute('data-agy-theme', themeLabel);
+if ((force || light !== lastAppliedLight) && activityModalOpen) {
+const stats = activityStatsCache || normalizeActivityStats(null);
+const cells = activityOverlayEl.querySelectorAll('.agy-ta-cell[data-date]');
+for (const cell of cells) {
+const dateStr = cell.getAttribute('data-date');
+const day = getDayData(stats, dateStr);
+cell.style.background = getHeatmapColor(day.total, light);
+}
+}
+}
+lastAppliedLight = light;
+return light;
+}
+function updateBarLayout(footer, leftGroup, bar) {
+try {
+if (!footer || !leftGroup || !bar)
+return;
+const footerWidth = Number(footer.clientWidth) || 0;
+const leftWidth = Number(leftGroup.clientWidth) || 0;
+if (footerWidth <= 0 || leftWidth <= 0)
+return;
+let controlsWidth = 0;
+const children = leftGroup.children || [];
+for (let i = 0; i < children.length; i++) {
+const ch = children[i];
+if (!ch || ch === bar)
+continue;
+if (typeof g.getComputedStyle === 'function') {
+const style = g.getComputedStyle(ch);
+if (style && (style.display === 'none' || style.position === 'absolute'))
+continue;
+}
+controlsWidth += Math.max(Number(ch.offsetWidth) || 0, Number(ch.scrollWidth) || 0);
+}
+const wasWrapped = bar.classList.contains('is-wrapped');
+const wasCompact = bar.classList.contains('is-compact');
+const wrapThreshold = controlsWidth + 235 + (wasWrapped ? 18 : 0);
+const compactThreshold = controlsWidth + 300 + (wasCompact ? 14 : 0);
+const shouldWrap = footerWidth < 450 || leftWidth < wrapThreshold;
+const shouldCompact = shouldWrap || footerWidth < 590 || leftWidth < compactThreshold;
+bar.classList.toggle('is-compact', shouldCompact);
+bar.classList.toggle('is-wrapped', shouldWrap);
+}
+catch { }
+}
+const observedFooters = typeof g.WeakSet === 'function' ? new g.WeakSet() : null;
+const footerResizeObserver = typeof g.ResizeObserver === 'function'
+? new g.ResizeObserver((entries) => {
+for (const entry of entries) {
+const footer = entry && entry.target;
+if (!footer)
+continue;
+const leftGroup = footer.firstElementChild;
+const bar = leftGroup && leftGroup.querySelector(`.${BAR_CLASS}`);
+if (leftGroup && bar) {
+updateBarLayout(footer, leftGroup, bar);
+}
+}
+})
+: null;
 function createBarElement() {
 const el = g.document.createElement('div');
-el.className = BAR_CLASS;
+const light = isLightTheme();
+el.className = light ? `${BAR_CLASS} ${LIGHT_BAR_CLASS}` : BAR_CLASS;
 el.setAttribute('data-testid', 'agy-custom-telemetry-bar');
+el.setAttribute('data-agy-theme', light ? 'light' : 'dark');
 el.title = '点击查看 Token 活动看板 (日/周/月消耗与热力图)';
 el.innerHTML = `
 <span class="agy-tm-item">
-<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0; margin-right:5px; color:#91919C;">
+<svg class="agy-tm-ico" width="14" height="14" viewBox="0 0 16 16" fill="none">
 <path d="M9.2 1.5L3.2 8.8H7.5L6.8 14.5L12.8 7.2H8.5L9.2 1.5Z" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 <span class="agy-tm-pri" data-role="speed-val">--</span>
@@ -24,26 +98,26 @@ el.innerHTML = `
 </span>
 <span class="agy-tm-dot">·</span>
 <span class="agy-tm-item">
-<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0; margin-right:5px;">
-<circle cx="8" cy="8" r="6" stroke="#52535E" stroke-opacity="0.85" stroke-width="1.5"/>
-<circle data-role="ring-arc" cx="8" cy="8" r="6" stroke="#91919C" stroke-width="1.55" stroke-linecap="round" stroke-dasharray="${RING_CIRCUMFERENCE.toFixed(2)}" stroke-dashoffset="${RING_CIRCUMFERENCE.toFixed(2)}" transform="rotate(-90 8 8)" style="transition: stroke-dashoffset 0.25s ease;"/>
+<svg class="agy-tm-ico" width="14" height="14" viewBox="0 0 16 16" fill="none">
+<circle cx="8" cy="8" r="6" stroke="var(--agy-tm-ring-track)" stroke-opacity="0.85" stroke-width="1.5"/>
+<circle data-role="ring-arc" cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-dasharray="${RING_CIRCUMFERENCE.toFixed(2)}" stroke-dashoffset="${RING_CIRCUMFERENCE.toFixed(2)}" transform="rotate(-90 8 8)" style="transition: stroke-dashoffset 0.25s ease;"/>
 </svg>
 <span class="agy-tm-pri" data-role="ctx-val">0 / 1M</span>
 <span class="agy-tm-sec" data-role="ctx-pct" style="margin-left:5px;">0%</span>
 </span>
 <span class="agy-tm-dot">·</span>
 <span class="agy-tm-item">
-<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0; margin-right:5px;">
-<path d="M8 2.2L14 5.2L8 8.2L2 5.2L8 2.2Z" stroke="#91919C" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M2 8.4L8 11.4L14 8.4" stroke="#91919C" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M2 11.4L8 14.4L14 11.4" stroke="#91919C" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<svg class="agy-tm-ico" width="14" height="14" viewBox="0 0 16 16" fill="none">
+<path d="M8 2.2L14 5.2L8 8.2L2 5.2L8 2.2Z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M2 8.4L8 11.4L14 8.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M2 11.4L8 14.4L14 11.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 <span class="agy-tm-pri" data-role="cache-val">0%</span>
 </span>
 <span class="agy-tm-dot">·</span>
 <span class="agy-tm-item agy-tm-activity-trigger" data-role="activity-trigger">
-<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0; margin-right:5px;">
-<path d="M12.5 2.5H3.5L8.3 8L3.5 13.5H12.5" stroke="#91919C" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+<svg class="agy-tm-ico" width="14" height="14" viewBox="0 0 16 16" fill="none">
+<path d="M12.5 2.5H3.5L8.3 8L3.5 13.5H12.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 <span class="agy-tm-pri" data-role="total-val">0</span>
 </span>
@@ -73,7 +147,13 @@ leftGroup.appendChild(bar);
 else if (leftGroup.lastElementChild !== bar) {
 leftGroup.appendChild(bar);
 }
+updateBarLayout(footer, leftGroup, bar);
+if (footerResizeObserver && observedFooters && !observedFooters.has(footer)) {
+observedFooters.add(footer);
+footerResizeObserver.observe(footer);
 }
+}
+applyThemeState(false);
 }
 const FIBER_EXTRACTOR_SCRIPT = `(() => {
 try {
@@ -81,38 +161,67 @@ const w = window;
 if (!w.__agyStreamTrackers) {
 w.__agyStreamTrackers = {};
 }
+const findFiberKey = (el) => {
+if (!el || typeof el !== 'object') return null;
+return Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) || null;
+};
+const getFiber = (el) => {
+const k = findFiberKey(el);
+return k ? el[k] : null;
+};
 const footers = Array.from(document.querySelectorAll('.agy-composer-footer'));
 return footers.map((footer) => {
-const inputEl = footer.querySelector('.no-focus-agent-input');
-if (!inputEl) return null;
-const domModelText = (inputEl.textContent || '').trim();
-const triggerBtn = inputEl.querySelector('[data-testid="model-selector-trigger"]');
+const inputEl = footer.querySelector('.no-focus-agent-input')
+|| (footer.closest ? footer.closest('.no-focus-agent-input') : null);
+const triggerBtn = (inputEl && inputEl.querySelector('[data-testid="model-selector-trigger"]'))
+|| footer.querySelector('[data-testid="model-selector-trigger"]');
+const domModelText = ((inputEl && inputEl.textContent) || (triggerBtn && triggerBtn.textContent) || '').trim();
 const domCtxWin = triggerBtn ? triggerBtn.getAttribute('data-context-window') : null;
-const fiberKey = Object.keys(inputEl).find(k => k.startsWith('__reactFiber$'));
-if (!fiberKey) return { conversationId: null, modelLabel: domModelText, selectedContextWindow: domCtxWin };
-let curr = inputEl[fiberKey];
+let startFiber = getFiber(inputEl) || getFiber(triggerBtn) || getFiber(footer);
+if (!startFiber) {
+const descendants = footer.querySelectorAll('*');
+const maxDesc = Math.min(descendants.length, 30);
+for (let di = 0; di < maxDesc; di++) {
+const node = descendants[di];
+if (node.closest && node.closest('.agy-custom-telemetry-bar')) continue;
+const f = getFiber(node);
+if (f) {
+startFiber = f;
+break;
+}
+}
+}
+if (!startFiber) {
+let anc = footer.parentElement;
+let ancSteps = 0;
+while (anc && ancSteps < 8) {
+const f = getFiber(anc);
+if (f) {
+startFiber = f;
+break;
+}
+anc = anc.parentElement;
+ancSteps++;
+}
+}
+if (!startFiber) return { conversationId: null, modelLabel: domModelText, selectedContextWindow: domCtxWin };
 let conversationId = null;
 let modelLabel = domModelText;
 let selectedContextWindow = domCtxWin;
 let isRunning = false;
 let agentStateProvider = null;
 let trajectoriesManager = null;
-if (curr.child && curr.child.memoizedProps) {
-const cp = curr.child.memoizedProps;
-if (cp.selectedModel && cp.selectedModel.label) modelLabel = cp.selectedModel.label;
-if (cp.contextWindow && cp.contextWindow.selected) selectedContextWindow = cp.contextWindow.selected;
-}
-let depth = 0;
-while (curr && depth < 90) {
-const mp = curr.memoizedProps;
-if (mp && typeof mp === 'object') {
+const inspectProps = (mp, allowOverwriteRunning) => {
+if (!mp || typeof mp !== 'object') return;
+if (mp.selectedModel && mp.selectedModel.label) modelLabel = mp.selectedModel.label;
+if (mp.contextWindow && mp.contextWindow.selected) selectedContextWindow = mp.contextWindow.selected;
 if (!conversationId && (typeof mp.conversationId === 'string' || typeof mp.cascadeId === 'string')) {
 const cid = mp.conversationId || mp.cascadeId;
 if (cid && cid !== '_new') {
 conversationId = cid;
 }
 }
-if (typeof mp.isRunning === 'boolean') {
+if (typeof mp.isRunning === 'boolean' && (allowOverwriteRunning || !isRunning)) {
 isRunning = mp.isRunning;
 }
 if (!modelLabel && mp.currentModelConfig && mp.currentModelConfig.label) {
@@ -127,7 +236,33 @@ if (!trajectoriesManager && typeof val.peek === 'function' && typeof val.getAgen
 trajectoriesManager = val;
 }
 }
+};
+const footerFiber = getFiber(footer);
+const queue = [];
+const visited = typeof Set === 'function' ? new Set() : null;
+if (startFiber.child) queue.push({ node: startFiber.child, depth: 0 });
+if (footerFiber && footerFiber !== startFiber && footerFiber.child) {
+queue.push({ node: footerFiber.child, depth: 0 });
 }
+let bfsSteps = 0;
+while (queue.length > 0 && bfsSteps < 100) {
+const item = queue.shift();
+const fn = item && item.node;
+if (!fn || (visited && visited.has(fn))) continue;
+if (visited) visited.add(fn);
+bfsSteps++;
+inspectProps(fn.memoizedProps, false);
+if (item.depth < 8 && fn.child) {
+queue.push({ node: fn.child, depth: item.depth + 1 });
+}
+if (fn.sibling && bfsSteps + queue.length < 100) {
+queue.push({ node: fn.sibling, depth: item.depth });
+}
+}
+let curr = startFiber;
+let depth = 0;
+while (curr && depth < 110) {
+inspectProps(curr.memoizedProps, true);
 curr = curr.return;
 depth++;
 }
@@ -384,7 +519,7 @@ const footers = Array.from(g.document.querySelectorAll('.agy-composer-footer'));
 if (footers.length === 0)
 return;
 let reactDataList = null;
-if (electronObj.webFrame && typeof electronObj.webFrame.executeJavaScript === 'function') {
+if (electronObj && electronObj.webFrame && typeof electronObj.webFrame.executeJavaScript === 'function') {
 reactDataList = await electronObj.webFrame.executeJavaScript(FIBER_EXTRACTOR_SCRIPT).catch(() => null);
 }
 for (let i = 0; i < footers.length; i++) {
@@ -418,9 +553,9 @@ if (elTotal)
 elTotal.textContent = '0';
 continue;
 }
-const ipcStats = await electronObj.ipcRenderer
-.invoke('telemetry:get-stats', convId)
-.catch(() => null);
+const ipcStats = electronObj && electronObj.ipcRenderer && typeof electronObj.ipcRenderer.invoke === 'function'
+? await electronObj.ipcRenderer.invoke('telemetry:get-stats', convId).catch(() => null)
+: null;
 const speed = (reactData && reactData.serverTps > 0)
 ? reactData.serverTps
 : (ipcStats && ipcStats.tokensPerSecond > 0)
@@ -472,12 +607,39 @@ isPolling = false;
 }
 }
 let mountScheduled = false;
+let observedBody = null;
+let themeObserver = null;
+const THEME_ATTR_FILTER = ['class', 'style', 'data-theme', 'data-agy-theme', 'data-newux-theme'];
+const ensureThemeObservers = () => {
+if (typeof g.MutationObserver !== 'function')
+return;
+if (!themeObserver) {
+themeObserver = new g.MutationObserver(() => {
+applyThemeState(false);
+});
+if (g.document.documentElement) {
+themeObserver.observe(g.document.documentElement, {
+attributes: true,
+attributeFilter: THEME_ATTR_FILTER,
+});
+}
+}
+if (g.document.body && observedBody !== g.document.body) {
+observedBody = g.document.body;
+themeObserver.observe(observedBody, {
+attributes: true,
+attributeFilter: THEME_ATTR_FILTER,
+});
+applyThemeState(false);
+}
+};
 const scheduleMount = () => {
 if (mountScheduled)
 return;
 mountScheduled = true;
 const run = () => {
 mountScheduled = false;
+ensureThemeObservers();
 ensureBarsMounted();
 void updateTelemetry();
 };
@@ -490,9 +652,15 @@ setTimeout(run, 50);
 };
 const startObserver = () => {
 const root = g.document.documentElement || g.document.body;
-if (!root || typeof g.MutationObserver !== 'function')
+if (!root || typeof g.MutationObserver !== 'function') {
+ensureBarsMounted();
 return;
+}
+ensureThemeObservers();
 new g.MutationObserver((mutations) => {
+if (g.document.body && observedBody !== g.document.body) {
+ensureThemeObservers();
+}
 for (const m of mutations) {
 if (m.target && m.target.closest && (m.target.closest(`.${BAR_CLASS}`) || m.target.closest(`#${MODAL_ID}`))) {
 continue;
@@ -507,8 +675,22 @@ scheduleMount();
 break;
 }
 }).observe(root, { childList: true, subtree: true });
+if (typeof g.matchMedia === 'function') {
+try {
+const mq = g.matchMedia('(prefers-color-scheme: dark)');
+if (mq && typeof mq.addEventListener === 'function') {
+mq.addEventListener('change', () => {
+applyThemeState(false);
+});
+}
+}
+catch { }
+}
 scheduleMount();
 };
+if (typeof g.addEventListener === 'function') {
+g.addEventListener('beforeunload', handleBeforeUnload);
+}
 if (g.document.readyState === 'loading') {
 g.document.addEventListener('DOMContentLoaded', startObserver);
 }
