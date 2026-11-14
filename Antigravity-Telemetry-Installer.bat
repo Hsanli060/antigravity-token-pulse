@@ -466,6 +466,103 @@ function Resolve-CommandTargetPath([string]$cmdStr) {
     return ""
 }
 
+function Read-HttpResponseUtf8Text($resp) {
+    if (-not $resp) { return $null }
+    if ($resp.RawContentStream) {
+        $ms = New-Object System.IO.MemoryStream
+        try {
+            if ($resp.RawContentStream.CanSeek) {
+                $resp.RawContentStream.Position = 0
+            }
+            $resp.RawContentStream.CopyTo($ms)
+            $rawBytes = $ms.ToArray()
+            if ($rawBytes -and $rawBytes.Length -gt 0) {
+                return [System.Text.Encoding]::UTF8.GetString($rawBytes).TrimStart([char]0xFEFF)
+            }
+        } finally {
+            $ms.Dispose()
+        }
+    }
+    $content = $resp.Content
+    if ($content -is [byte[]]) {
+        return [System.Text.Encoding]::UTF8.GetString($content).TrimStart([char]0xFEFF)
+    } elseif ($content) {
+        return ([string]$content).TrimStart([char]0xFEFF)
+    }
+    return $null
+}
+
+function Test-ModResourceContent([string]$fileName, [string]$text) {
+    if (-not $text) { return $false }
+    $trimmed = $text.Trim()
+    if ($trimmed.Length -lt 500) { return $false }
+    if ($trimmed -match "(?is)^(?:<!doctype|<html|<head|<\?xml)") { return $false }
+    switch ($fileName) {
+        "ipc-block.js" {
+            return ($text.Contains("TELEMETRY_MOD_IPC_START") -and $text.Contains("TELEMETRY_MOD_IPC_END"))
+        }
+        "preload-part1.js" {
+            return ($text.Contains("TELEMETRY_MOD_PRELOAD_START") -and $text.Contains("installTelemetryBar"))
+        }
+        "preload-part2.js" {
+            return $text.Contains("refreshActivityModal")
+        }
+        "preload-part3.js" {
+            return $text.Contains("TELEMETRY_MOD_PRELOAD_END")
+        }
+        "agy-statusline.js" {
+            return ($trimmed.StartsWith("#!/usr/bin/env node") -and $text.Contains("TELEMETRY_MOD_CLI_STATUSLINE"))
+        }
+        default {
+            return $true
+        }
+    }
+}
+
+function Resolve-ModRemoteRef {
+    if ($script:ModRefInitialized) {
+        return @{ Ref = $script:ResolvedModRef; IsImmutable = $script:ResolvedModIsImmutable }
+    }
+    $script:ModRefInitialized = $true
+    $script:ResolvedModRef = "main"
+    $script:ResolvedModIsImmutable = $false
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    if ($env:ANTIGRAVITY_MOD_REF -and $env:ANTIGRAVITY_MOD_REF.Trim()) {
+        $overrideRef = $env:ANTIGRAVITY_MOD_REF.Trim()
+        if ($overrideRef -notmatch "^[A-Za-z0-9._/-]+$" -or $overrideRef.Contains("..")) {
+            throw "无效的 ANTIGRAVITY_MOD_REF 值: '$overrideRef'"
+        }
+        $script:ResolvedModRef = $overrideRef
+        $script:ResolvedModIsImmutable = ($overrideRef -match "^[0-9a-fA-F]{40}$")
+        Write-Host "[在线] 使用指定模块引用: $($script:ResolvedModRef)" -ForegroundColor DarkCyan
+        return @{ Ref = $script:ResolvedModRef; IsImmutable = $script:ResolvedModIsImmutable }
+    }
+
+    $apiUrl = "https://api.github.com/repos/Hsanli060/antigravity-token-pulse/commits/main"
+    try {
+        $resp = Invoke-WebRequest -Uri $apiUrl -UseBasicParsing -TimeoutSec 5 -UserAgent "Antigravity-Telemetry-Installer" -Headers @{
+            "Accept"        = "application/vnd.github.sha"
+            "Cache-Control" = "no-cache"
+            "Pragma"        = "no-cache"
+        }
+        $shaText = Read-HttpResponseUtf8Text $resp
+        if ($shaText) { $shaText = $shaText.Trim() }
+        if ($shaText -and $shaText -match "^[0-9a-fA-F]{40}$") {
+            $script:ResolvedModRef = $shaText.ToLowerInvariant()
+            $script:ResolvedModIsImmutable = $true
+            Write-Host "[在线] 已解析最新 main 提交 SHA: $($script:ResolvedModRef.Substring(0, 8))" -ForegroundColor DarkCyan
+            return @{ Ref = $script:ResolvedModRef; IsImmutable = $script:ResolvedModIsImmutable }
+        }
+    } catch {}
+
+    Write-Host "[在线] GitHub API SHA 解析未命中，回退使用 main（优先直连 raw.githubusercontent.com）" -ForegroundColor DarkYellow
+    return @{ Ref = $script:ResolvedModRef; IsImmutable = $script:ResolvedModIsImmutable }
+}
+
 function Get-ModResource([string]$fileName) {
     $batDir = if ($env:SELF_BAT) { Split-Path -Parent $env:SELF_BAT } else { (Get-Location).Path }
     $localSrc = Join-Path (Join-Path $batDir "src") $fileName
@@ -476,60 +573,58 @@ function Get-ModResource([string]$fileName) {
     $geminiRoot = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".gemini" } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA ".gemini" } else { [System.IO.Path]::GetTempPath() }
     $cacheDir = Join-Path (Join-Path $geminiRoot "telemetry-mod-cache") "src"
     $cachePath = Join-Path $cacheDir $fileName
-    $urls = @(
-        "https://fastly.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@main/src/$fileName",
-        "https://cdn.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@main/src/$fileName",
-        "https://raw.githubusercontent.com/Hsanli060/antigravity-token-pulse/main/src/$fileName"
-    )
+
+    $refInfo = Resolve-ModRemoteRef
+    $ref = $refInfo.Ref
+    if ($refInfo.IsImmutable) {
+        $shortRef = $ref.Substring(0, 8)
+        $sources = @(
+            @{ Url = "https://raw.githubusercontent.com/Hsanli060/antigravity-token-pulse/$ref/src/$fileName"; Label = "raw.githubusercontent.com@$shortRef" },
+            @{ Url = "https://cdn.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@$ref/src/$fileName"; Label = "cdn.jsdelivr.net@$shortRef" },
+            @{ Url = "https://fastly.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@$ref/src/$fileName"; Label = "fastly.jsdelivr.net@$shortRef" }
+        )
+    } else {
+        $sources = @(
+            @{ Url = "https://raw.githubusercontent.com/Hsanli060/antigravity-token-pulse/$ref/src/$fileName"; Label = "raw.githubusercontent.com/$ref" },
+            @{ Url = "https://fastly.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@$ref/src/$fileName"; Label = "fastly.jsdelivr.net@$ref" },
+            @{ Url = "https://cdn.jsdelivr.net/gh/Hsanli060/antigravity-token-pulse@$ref/src/$fileName"; Label = "cdn.jsdelivr.net@$ref" }
+        )
+    }
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch {}
 
-    foreach ($url in $urls) {
+    foreach ($srcItem in $sources) {
         try {
-            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15
-            $text = $null
-            if ($resp.RawContentStream) {
-                $ms = New-Object System.IO.MemoryStream
-                try {
-                    if ($resp.RawContentStream.CanSeek) {
-                        $resp.RawContentStream.Position = 0
-                    }
-                    $resp.RawContentStream.CopyTo($ms)
-                    $rawBytes = $ms.ToArray()
-                    if ($rawBytes -and $rawBytes.Length -gt 0) {
-                        $text = [System.Text.Encoding]::UTF8.GetString($rawBytes).TrimStart([char]0xFEFF)
-                    }
-                } finally {
-                    $ms.Dispose()
-                }
+            $resp = Invoke-WebRequest -Uri $srcItem.Url -UseBasicParsing -TimeoutSec 15 -UserAgent "Antigravity-Telemetry-Installer" -Headers @{
+                "Cache-Control" = "no-cache"
+                "Pragma"        = "no-cache"
             }
-            if (-not $text) {
-                $content = $resp.Content
-                if ($content -is [byte[]]) {
-                    $text = [System.Text.Encoding]::UTF8.GetString($content).TrimStart([char]0xFEFF)
-                } elseif ($content) {
-                    $text = ([string]$content).TrimStart([char]0xFEFF)
-                }
+            $text = Read-HttpResponseUtf8Text $resp
+            if (-not (Test-ModResourceContent $fileName $text)) {
+                Write-Host "[重试] $($srcItem.Label) 返回的 $fileName 内容校验未通过，切换下一个源..." -ForegroundColor Yellow
+                continue
             }
-            if ($text -and $text.Trim().Length -gt 20) {
-                $normalized = ($text -replace "\r\n", "`n").TrimEnd()
-                if (-not (Test-Path -LiteralPath $cacheDir)) {
-                    New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
-                }
-                Write-Utf8NoBom $cachePath ($normalized + "`n")
-                return $normalized
+            $normalized = ($text -replace "\r\n", "`n").TrimEnd()
+            if (-not (Test-Path -LiteralPath $cacheDir)) {
+                New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
             }
+            Write-Utf8NoBom $cachePath ($normalized + "`n")
+            Write-Host "[在线] 已加载 $fileName <- $($srcItem.Label)" -ForegroundColor DarkGray
+            return $normalized
         } catch {}
     }
 
     if (Test-Path -LiteralPath $cachePath) {
-        Write-Host "[缓存] 网络不可用，已使用本地缓存模块: $fileName" -ForegroundColor Yellow
-        return ((Read-Utf8NoBom $cachePath) -replace "\r\n", "`n").TrimEnd()
+        $cached = ((Read-Utf8NoBom $cachePath) -replace "\r\n", "`n").TrimEnd()
+        if (Test-ModResourceContent $fileName $cached) {
+            Write-Host "[缓存] 网络不可用或校验未通过，已使用本地缓存模块: $fileName" -ForegroundColor Yellow
+            return $cached
+        }
     }
 
-    throw "无法加载模块 $fileName ：未找到本地 src/$fileName 且在线镜像下载失败。建议直接下载仓库 ZIP 压缩包后离线运行。"
+    throw "无法加载模块 $fileName ：未找到本地 src/$fileName 且在线镜像下载/校验均失败。建议直接下载仓库 ZIP 压缩包后离线运行。"
 }
 
 function Split-TrailingSourceMap([string]$code) {
