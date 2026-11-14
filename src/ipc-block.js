@@ -6,27 +6,83 @@ const fsTelemetry = require('fs');
 const electronMain = (typeof electron_1 !== 'undefined' && electron_1.ipcMain) ? electron_1.ipcMain : require('electron').ipcMain;
 const telemetryCache = new Map();
 
+function stripBom(text) {
+  return String(text == null ? '' : text).replace(/^\uFEFF/, '');
+}
+
+function getCliHomeDir(homeDir) {
+  const envCliHome = typeof process.env.ANTIGRAVITY_CLI_HOME === 'string'
+    ? process.env.ANTIGRAVITY_CLI_HOME.trim()
+    : '';
+  if (envCliHome) {
+    return pathTelemetry.resolve(envCliHome);
+  }
+  return pathTelemetry.join(homeDir, '.gemini', 'antigravity-cli');
+}
+
+function isHexOrUuid(s) {
+  return /^[0-9a-f]{16,64}$/i.test(s) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+const MODEL_PAREN_SUFFIX_RE = /\s*\((?:Extra\s+Low|Very\s+High|XHigh|High|Medium|Low|Max|Thinking|Fast|Slow|Standard|Preview|Experimental|MaaS|\d+(?:\.\d+)?\s*[KM](?:\s*context)?)\)\s*$/i;
+const MODEL_SLUG_SUFFIX_RE = /-(?:maas|extra[-_]low|very[-_]high|xhigh|high|medium|low|max|thinking|tiered|trial|preview|exp|latest|control|worker-agy|orchestrator-g1-pro|1m|2m|128k|200k|256k|512k|1000k|\d{4}-\d{2}-\d{2}|\d{8}|[nhabc])$/i;
+
+function stripModelParenSuffixes(raw) {
+  let name = String(raw || '').trim();
+  let prev;
+  do {
+    prev = name;
+    name = name.replace(MODEL_PAREN_SUFFIX_RE, '').trim();
+  } while (name !== prev);
+  return name;
+}
+
+function normalizeModelSlug(raw) {
+  let s = stripModelParenSuffixes(raw);
+  if (!s || isHexOrUuid(s)) return '';
+  s = s.replace(/^(?:[a-z0-9._-]+\/)+/i, '');
+  s = s.replace(/@.*$/, '').trim();
+  if (!s || isHexOrUuid(s)) return '';
+  if (/^gemini-pro-orchestrator-g1-pro$/i.test(s)) return 'Gemini 4 Argon';
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(MODEL_SLUG_SUFFIX_RE, '');
+  } while (s !== prev);
+  s = s.replace(/(\d)[-_](\d)/g, '$1.$2').replace(/(\d)[-_](\d)/g, '$1.$2');
+  const parts = s.split(/[-_]+/).filter(Boolean).map((w) => {
+    if (/^gpt$/i.test(w)) return 'GPT';
+    if (/^oss$/i.test(w)) return 'OSS';
+    if (/^\d+(?:\.\d+)?[bk]$/i.test(w)) return w.toUpperCase();
+    if (/^\d/.test(w)) return w;
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  });
+  return parts.join(' ').trim();
+}
+
 function normalizeModelName(rawDisplay, rawInternal) {
   const d = String(rawDisplay || '').trim();
-  if (d && !/^[0-9a-f]{16,64}$/i.test(d)) {
-    let name = d.replace(/\s*\((?:XHigh|High|Medium|Low|Max|Thinking|Fast|Slow|Standard|Preview|Experimental)\)\s*$/i, '').trim();
+  if (d && !isHexOrUuid(d)) {
+    let name = stripModelParenSuffixes(d);
+    const looksLikeSlug = name && !/\s/.test(name) && (
+      name.includes('/') ||
+      name.includes('@') ||
+      /-(?:maas|extra[-_]low|very[-_]high|xhigh|high|medium|low|max|thinking|tiered|trial|preview|exp|latest|control|worker-agy|orchestrator-g1-pro)$/i.test(name) ||
+      (/^[a-z0-9._-]+$/.test(name) && name.includes('-'))
+    );
+    if (looksLikeSlug) {
+      const slugRes = normalizeModelSlug(name);
+      if (slugRes) return slugRes;
+    }
+    name = name.replace(/^(?:[a-z0-9._-]+\/)+/i, '').replace(/@[^\s()]*$/, '').trim();
     if (/^Orchestrator\s*\(([^)]+)\)$/i.test(name)) {
       name = 'Gemini 4 ' + name.match(/^Orchestrator\s*\(([^)]+)\)$/i)[1].trim();
     }
-    return name;
+    if (name && !isHexOrUuid(name)) return name;
   }
   const intern = String(rawInternal || '').trim();
-  if (intern && !/^[0-9a-f]{16,64}$/i.test(intern)) {
-    if (/^gemini-pro-orchestrator-g1-pro$/i.test(intern)) return 'Gemini 4 Argon';
-    let s = intern.replace(/(\d)-(\d)/g, '$1.$2');
-    const suffixRe = /-(?:tiered|trial|preview|exp|latest|high|medium|low|xhigh|max|thinking|control|n|h|a|b|c|worker-agy|orchestrator-g1-pro)$/gi;
-    s = s.replace(suffixRe, '').replace(suffixRe, '');
-    const parts = s.split('-').filter(Boolean).map((w) => {
-      if (/^gpt$/i.test(w)) return 'GPT';
-      if (/^\d/.test(w)) return w;
-      return w.charAt(0).toUpperCase() + w.slice(1);
-    });
-    const res = parts.join(' ').trim();
+  if (intern && !isHexOrUuid(intern)) {
+    const res = normalizeModelSlug(intern);
     if (res) return res;
   }
   return '';
@@ -75,6 +131,7 @@ function extractConvModelMap(convDbPath) {
         const isLast = filePos >= stat.size;
         const scanEnd = isLast ? totalLen : totalLen - MARGIN;
         let offset = carryLen > 0 ? Math.max(0, carryLen - MARGIN) : 0;
+        let prevLsiEnd = offset;
         while (offset < scanEnd) {
           const idx = chunkBuf.indexOf(needleLsi, offset);
           if (idx === -1 || idx >= scanEnd) break;
@@ -85,26 +142,27 @@ function extractConvModelMap(convDbPath) {
               const stepStr = chunkBuf.slice(pos + 1, pos + 1 + vlen).toString('latin1');
               if (/^\d+$/.test(stepStr)) {
                 let rawInternal = '';
-                const intStart = Math.max(0, idx - 650);
+                const intStart = Math.max(prevLsiEnd, idx - 650);
                 for (let k = intStart; k <= idx - 3; k++) {
                   if (chunkBuf[k] === 0x9a && chunkBuf[k + 1] === 0x01) {
                     const mlen = chunkBuf[k + 2];
-                    if (mlen >= 4 && mlen <= 64 && k + 3 + mlen <= idx) {
+                    if (mlen >= 4 && mlen <= 120 && k + 3 + mlen <= idx) {
                       const s = chunkBuf.slice(k + 3, k + 3 + mlen).toString('utf8');
-                      if (/^[a-z][a-z0-9._-]+$/i.test(s) && !/^[0-9a-f]{16,64}$/i.test(s)) {
+                      if (/^[a-z][a-z0-9._/@-]+$/i.test(s) && !isHexOrUuid(s)) {
                         rawInternal = s;
                       }
                     }
                   }
                 }
                 let rawDisplay = '';
-                const winEnd = Math.min(totalLen, idx + 650);
-                for (let k = idx + needleLsi.length; k <= winEnd - 3; k++) {
+                const nextIdx = chunkBuf.indexOf(needleLsi, pos);
+                const winEnd = Math.min(totalLen, idx + 650, nextIdx !== -1 ? nextIdx : totalLen);
+                for (let k = pos; k <= winEnd - 3; k++) {
                   if (chunkBuf[k] === 0xaa && chunkBuf[k + 1] === 0x01) {
                     const dlen = chunkBuf[k + 2];
-                    if (dlen >= 4 && dlen <= 64 && k + 3 + dlen <= winEnd) {
+                    if (dlen >= 4 && dlen <= 120 && k + 3 + dlen <= winEnd) {
                       const s = chunkBuf.slice(k + 3, k + 3 + dlen).toString('utf8');
-                      if (/^[A-Za-z][A-Za-z0-9 ._()\-+/]+$/.test(s) && !/^[0-9a-f]{16,64}$/i.test(s)) {
+                      if (/^[A-Za-z][A-Za-z0-9 ._()\-+/]+$/.test(s) && !isHexOrUuid(s)) {
                         rawDisplay = s;
                         break;
                       }
@@ -119,7 +177,8 @@ function extractConvModelMap(convDbPath) {
               }
             }
           }
-          offset = idx + needleLsi.length;
+          prevLsiEnd = pos;
+          offset = pos;
         }
         if (isLast) break;
         carryLen = Math.min(KEEP, totalLen);
@@ -156,15 +215,115 @@ function resolveStepModel(stepIdx, modelInfo, fallbackModel) {
     }
     return modelInfo.stepMap[chosen];
   }
-  return (modelInfo && modelInfo.defaultModel) || fallbackModel || '其他模型';
+  const fb = fallbackModel ? (normalizeModelName(fallbackModel, '') || String(fallbackModel).trim()) : '';
+  return (modelInfo && modelInfo.defaultModel) || fb || '其他模型';
+}
+
+function isConvEntryNewer(candidate, current) {
+  if (!candidate || typeof candidate !== 'object' || typeof candidate.mtimeMs !== 'number') {
+    return false;
+  }
+  if (!current || typeof current !== 'object' || typeof current.mtimeMs !== 'number') {
+    return true;
+  }
+  if (candidate.mtimeMs !== current.mtimeMs) {
+    return candidate.mtimeMs > current.mtimeMs;
+  }
+  const candSize = Number(candidate.size) || 0;
+  const curSize = Number(current.size) || 0;
+  if (candSize !== curSize) {
+    return candSize > curSize;
+  }
+  return (Number(candidate.dbSize) || 0) > (Number(current.dbSize) || 0);
+}
+
+function sleepAsyncMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireFileLockAsync(lockPath, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fsTelemetry.openSync(lockPath, 'wx');
+      try {
+        fsTelemetry.writeSync(fd, `${process.pid}`);
+      } finally {
+        fsTelemetry.closeSync(fd);
+      }
+      return true;
+    } catch (err) {
+      const code = err && err.code;
+      if (code === 'EEXIST') {
+        try {
+          const st = fsTelemetry.statSync(lockPath);
+          if (Date.now() - st.mtimeMs > 5000) {
+            fsTelemetry.unlinkSync(lockPath);
+            continue;
+          }
+        } catch {}
+      } else if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') {
+        return false;
+      }
+      await sleepAsyncMs(12 + Math.floor(Math.random() * 14));
+    }
+  }
+  return false;
+}
+
+function releaseFileLockSync(lockPath) {
+  try {
+    if (fsTelemetry.existsSync(lockPath)) {
+      fsTelemetry.unlinkSync(lockPath);
+    }
+  } catch {}
+}
+
+async function atomicWriteFileAsync(targetPath, payload) {
+  const dir = pathTelemetry.dirname(targetPath);
+  if (!fsTelemetry.existsSync(dir)) {
+    fsTelemetry.mkdirSync(dir, { recursive: true });
+  }
+  const rand = Math.random().toString(36).slice(2, 8);
+  const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.${rand}.tmp`;
+  try {
+    fsTelemetry.writeFileSync(tmpPath, payload, 'utf8');
+    const retryDelays = [15, 30, 50, 80];
+    let renamed = false;
+    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+      try {
+        fsTelemetry.renameSync(tmpPath, targetPath);
+        renamed = true;
+        break;
+      } catch (err) {
+        const code = err && err.code;
+        const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+        if (retryable && attempt < retryDelays.length) {
+          await sleepAsyncMs(retryDelays[attempt]);
+          continue;
+        }
+        break;
+      }
+    }
+    if (!renamed) {
+      fsTelemetry.writeFileSync(targetPath, payload, 'utf8');
+    }
+  } finally {
+    try {
+      if (fsTelemetry.existsSync(tmpPath)) {
+        fsTelemetry.unlinkSync(tmpPath);
+      }
+    } catch {}
+  }
 }
 
 electronMain.removeHandler?.('telemetry:get-stats');
 electronMain.handle('telemetry:get-stats', async (_event, conversationId) => {
 try {
 const homeDir = osTelemetry.homedir();
+const cliHomeDir = getCliHomeDir(homeDir);
 const candidateDirs = [
-pathTelemetry.join(homeDir, '.gemini', 'antigravity-cli', 'brain'),
+pathTelemetry.join(cliHomeDir, 'brain'),
 pathTelemetry.join(homeDir, '.gemini', 'antigravity', 'brain'),
 ];
 let targetTranscriptPath = null;
@@ -189,12 +348,12 @@ const cacheKey = `${targetTranscriptPath}:${stat.mtimeMs}:${stat.size}`;
 if (telemetryCache.has(cacheKey)) {
 return telemetryCache.get(cacheKey);
 }
-const fileContent = await fsTelemetry.promises.readFile(targetTranscriptPath, 'utf-8');
+const fileContent = stripBom(await fsTelemetry.promises.readFile(targetTranscriptPath, 'utf-8'));
 const lines = fileContent.split(/\r?\n/).filter(Boolean);
 const rows = [];
 for (const line of lines) {
 try {
-rows.push(JSON.parse(line));
+rows.push(JSON.parse(stripBom(line)));
 }
 catch {
 }
@@ -334,15 +493,16 @@ const now = new Date();
 const todayKey = toLocalDayKey(now);
 try {
 const homeDir = osTelemetry.homedir();
+const cliHomeDir = getCliHomeDir(homeDir);
 const sources = [
 { source: 'desktop', dir: pathTelemetry.join(homeDir, '.gemini', 'antigravity', 'brain'), convDir: pathTelemetry.join(homeDir, '.gemini', 'antigravity', 'conversations') },
-{ source: 'cli', dir: pathTelemetry.join(homeDir, '.gemini', 'antigravity-cli', 'brain'), convDir: pathTelemetry.join(homeDir, '.gemini', 'antigravity-cli', 'conversations') },
+{ source: 'cli', dir: pathTelemetry.join(cliHomeDir, 'brain'), convDir: pathTelemetry.join(cliHomeDir, 'conversations') },
 ];
 const cachePath = pathTelemetry.join(homeDir, '.gemini', 'telemetry-activity-cache.json');
 let cache = { version: 4, conversations: {} };
 try {
 if (fsTelemetry.existsSync(cachePath)) {
-const rawCache = await fsTelemetry.promises.readFile(cachePath, 'utf-8');
+const rawCache = stripBom(await fsTelemetry.promises.readFile(cachePath, 'utf-8'));
 const parsed = JSON.parse(rawCache);
 if (parsed && typeof parsed === 'object' && parsed.version === 4 && parsed.conversations && typeof parsed.conversations === 'object') {
 cache = { version: 4, conversations: parsed.conversations };
@@ -402,7 +562,7 @@ continue;
 }
 let fileContent = '';
 try {
-fileContent = await fsTelemetry.promises.readFile(p, 'utf-8');
+fileContent = stripBom(await fsTelemetry.promises.readFile(p, 'utf-8'));
 }
 catch {
 continue;
@@ -411,7 +571,7 @@ const modelInfo = extractConvModelMap(dbPath);
 const daily = {};
 const lines = fileContent.split(/\r?\n/);
 for (let i = 0; i < lines.length; i++) {
-const line = lines[i].trim();
+const line = stripBom(lines[i]).trim();
 if (!line) {
 continue;
 }
@@ -471,16 +631,23 @@ updatedKeys.add(key);
 }
 }
 if (cacheDirty) {
+const cacheDir = pathTelemetry.dirname(cachePath);
+if (!fsTelemetry.existsSync(cacheDir)) {
+fsTelemetry.mkdirSync(cacheDir, { recursive: true });
+}
+const lockPath = `${cachePath}.lock`;
+const hasLock = await acquireFileLockAsync(lockPath, 1000);
+try {
 try {
 if (fsTelemetry.existsSync(cachePath)) {
-const latestRaw = await fsTelemetry.promises.readFile(cachePath, 'utf-8');
+const latestRaw = stripBom(await fsTelemetry.promises.readFile(cachePath, 'utf-8'));
 const latestParsed = JSON.parse(latestRaw);
 if (latestParsed && typeof latestParsed === 'object' && latestParsed.version === 4 && latestParsed.conversations && typeof latestParsed.conversations === 'object') {
 for (const [k, v] of Object.entries(latestParsed.conversations)) {
 if (!updatedKeys.has(k) && v && typeof v === 'object') {
 cache.conversations[k] = v;
 }
-else if (updatedKeys.has(k) && v && typeof v === 'object' && typeof v.mtimeMs === 'number' && (v.mtimeMs > cache.conversations[k].mtimeMs || (v.mtimeMs === cache.conversations[k].mtimeMs && Number(v.size) > cache.conversations[k].size))) {
+else if (updatedKeys.has(k) && isConvEntryNewer(v, cache.conversations[k])) {
 cache.conversations[k] = v;
 }
 }
@@ -489,35 +656,13 @@ cache.conversations[k] = v;
 }
 catch {
 }
-const cacheDir = pathTelemetry.dirname(cachePath);
-if (!fsTelemetry.existsSync(cacheDir)) {
-fsTelemetry.mkdirSync(cacheDir, { recursive: true });
-}
-const payload = JSON.stringify(cache);
-const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-try {
-fsTelemetry.writeFileSync(tmpPath, payload, 'utf8');
-try {
-fsTelemetry.renameSync(tmpPath, cachePath);
-}
-catch {
-fsTelemetry.writeFileSync(cachePath, payload, 'utf8');
-try {
-if (fsTelemetry.existsSync(tmpPath)) {
-fsTelemetry.unlinkSync(tmpPath);
-}
+await atomicWriteFileAsync(cachePath, JSON.stringify(cache));
 }
 catch {
 }
-}
-}
-catch {
-try {
-if (fsTelemetry.existsSync(tmpPath)) {
-fsTelemetry.unlinkSync(tmpPath);
-}
-}
-catch {
+finally {
+if (hasLock) {
+releaseFileLockSync(lockPath);
 }
 }
 }

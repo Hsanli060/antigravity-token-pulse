@@ -9,7 +9,138 @@ const { fileURLToPath } = require('url');
 
 const FIXED_MAX_TOKENS = 1000000; // 统一固定 1M 上下文窗口
 const SPEED_CACHE_PATH = path.join(os.tmpdir(), 'agy-cli-telemetry-cache.json');
-const ACTIVITY_CACHE_PATH = path.join(os.homedir(), '.gemini', 'telemetry-activity-cache.json');
+
+function stripBom(text) {
+  return String(text == null ? '' : text).replace(/^\uFEFF/, '');
+}
+
+function getCliHomeDir() {
+  const envCliHome = typeof process.env.ANTIGRAVITY_CLI_HOME === 'string'
+    ? process.env.ANTIGRAVITY_CLI_HOME.trim()
+    : '';
+  if (envCliHome) {
+    return path.resolve(envCliHome);
+  }
+  return path.join(os.homedir(), '.gemini', 'antigravity-cli');
+}
+
+function getActivityCachePath() {
+  return path.join(os.homedir(), '.gemini', 'telemetry-activity-cache.json');
+}
+
+function readSettingsModel() {
+  try {
+    const settingsPath = path.join(getCliHomeDir(), 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const raw = stripBom(fs.readFileSync(settingsPath, 'utf8')).trim();
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s && typeof s.model === 'string') {
+          return s.model.trim();
+        }
+      }
+    }
+  } catch {
+    // ignore malformed or unreadable settings
+  }
+  return '';
+}
+
+function sleepSyncMs(ms) {
+  const delay = Math.max(1, Number(ms) || 1);
+  try {
+    const sab = new SharedArrayBuffer(4);
+    const ia = new Int32Array(sab);
+    Atomics.wait(ia, 0, 0, delay);
+  } catch {
+    const end = Date.now() + delay;
+    while (Date.now() < end) {
+      // fallback wait
+    }
+  }
+}
+
+function acquireFileLockSync(lockPath, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      try {
+        fs.writeSync(fd, `${process.pid}`);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return true;
+    } catch (err) {
+      const code = err && err.code;
+      if (code === 'EEXIST') {
+        try {
+          const st = fs.statSync(lockPath);
+          if (Date.now() - st.mtimeMs > 5000) {
+            fs.unlinkSync(lockPath);
+            continue;
+          }
+        } catch {
+          // ignore race
+        }
+      } else if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') {
+        return false;
+      }
+      sleepSyncMs(12 + Math.floor(Math.random() * 14));
+    }
+  }
+  return false;
+}
+
+function releaseFileLockSync(lockPath) {
+  try {
+    if (fs.existsSync(lockPath)) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function atomicWriteFileSync(targetPath, payload) {
+  const dir = path.dirname(targetPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const rand = Math.random().toString(36).slice(2, 8);
+  const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.${rand}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, payload, 'utf8');
+    const retryDelays = [15, 30, 50, 80];
+    let renamed = false;
+    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+      try {
+        fs.renameSync(tmpPath, targetPath);
+        renamed = true;
+        break;
+      } catch (err) {
+        const code = err && err.code;
+        const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+        if (retryable && attempt < retryDelays.length) {
+          sleepSyncMs(retryDelays[attempt]);
+          continue;
+        }
+        break;
+      }
+    }
+    if (!renamed) {
+      fs.writeFileSync(targetPath, payload, 'utf8');
+    }
+  } finally {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {
+      // ignore cleanup error
+    }
+  }
+}
 
 function formatCompactTokens(num) {
   if (num == null || !Number.isFinite(Number(num)) || Number(num) <= 0) {
@@ -46,27 +177,69 @@ function normalizePath(p) {
   return trimmed;
 }
 
+function isHexOrUuid(s) {
+  return /^[0-9a-f]{16,64}$/i.test(s) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+const MODEL_PAREN_SUFFIX_RE = /\s*\((?:Extra\s+Low|Very\s+High|XHigh|High|Medium|Low|Max|Thinking|Fast|Slow|Standard|Preview|Experimental|MaaS|\d+(?:\.\d+)?\s*[KM](?:\s*context)?)\)\s*$/i;
+const MODEL_SLUG_SUFFIX_RE = /-(?:maas|extra[-_]low|very[-_]high|xhigh|high|medium|low|max|thinking|tiered|trial|preview|exp|latest|control|worker-agy|orchestrator-g1-pro|1m|2m|128k|200k|256k|512k|1000k|\d{4}-\d{2}-\d{2}|\d{8}|[nhabc])$/i;
+
+function stripModelParenSuffixes(raw) {
+  let name = String(raw || '').trim();
+  let prev;
+  do {
+    prev = name;
+    name = name.replace(MODEL_PAREN_SUFFIX_RE, '').trim();
+  } while (name !== prev);
+  return name;
+}
+
+function normalizeModelSlug(raw) {
+  let s = stripModelParenSuffixes(raw);
+  if (!s || isHexOrUuid(s)) return '';
+  s = s.replace(/^(?:[a-z0-9._-]+\/)+/i, '');
+  s = s.replace(/@.*$/, '').trim();
+  if (!s || isHexOrUuid(s)) return '';
+  if (/^gemini-pro-orchestrator-g1-pro$/i.test(s)) return 'Gemini 4 Argon';
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(MODEL_SLUG_SUFFIX_RE, '');
+  } while (s !== prev);
+  s = s.replace(/(\d)[-_](\d)/g, '$1.$2').replace(/(\d)[-_](\d)/g, '$1.$2');
+  const parts = s.split(/[-_]+/).filter(Boolean).map((w) => {
+    if (/^gpt$/i.test(w)) return 'GPT';
+    if (/^oss$/i.test(w)) return 'OSS';
+    if (/^\d+(?:\.\d+)?[bk]$/i.test(w)) return w.toUpperCase();
+    if (/^\d/.test(w)) return w;
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  });
+  return parts.join(' ').trim();
+}
+
 function normalizeModelName(rawDisplay, rawInternal) {
   const d = String(rawDisplay || '').trim();
-  if (d && !/^[0-9a-f]{16,64}$/i.test(d)) {
-    let name = d.replace(/\s*\((?:XHigh|High|Medium|Low|Max|Thinking|Fast|Slow|Standard|Preview|Experimental)\)\s*$/i, '').trim();
+  if (d && !isHexOrUuid(d)) {
+    let name = stripModelParenSuffixes(d);
+    const looksLikeSlug = name && !/\s/.test(name) && (
+      name.includes('/') ||
+      name.includes('@') ||
+      /-(?:maas|extra[-_]low|very[-_]high|xhigh|high|medium|low|max|thinking|tiered|trial|preview|exp|latest|control|worker-agy|orchestrator-g1-pro)$/i.test(name) ||
+      (/^[a-z0-9._-]+$/.test(name) && name.includes('-'))
+    );
+    if (looksLikeSlug) {
+      const slugRes = normalizeModelSlug(name);
+      if (slugRes) return slugRes;
+    }
+    name = name.replace(/^(?:[a-z0-9._-]+\/)+/i, '').replace(/@[^\s()]*$/, '').trim();
     if (/^Orchestrator\s*\(([^)]+)\)$/i.test(name)) {
       name = 'Gemini 4 ' + name.match(/^Orchestrator\s*\(([^)]+)\)$/i)[1].trim();
     }
-    return name;
+    if (name && !isHexOrUuid(name)) return name;
   }
   const intern = String(rawInternal || '').trim();
-  if (intern && !/^[0-9a-f]{16,64}$/i.test(intern)) {
-    if (/^gemini-pro-orchestrator-g1-pro$/i.test(intern)) return 'Gemini 4 Argon';
-    let s = intern.replace(/(\d)-(\d)/g, '$1.$2');
-    const suffixRe = /-(?:tiered|trial|preview|exp|latest|high|medium|low|xhigh|max|thinking|control|n|h|a|b|c|worker-agy|orchestrator-g1-pro)$/gi;
-    s = s.replace(suffixRe, '').replace(suffixRe, '');
-    const parts = s.split('-').filter(Boolean).map((w) => {
-      if (/^gpt$/i.test(w)) return 'GPT';
-      if (/^\d/.test(w)) return w;
-      return w.charAt(0).toUpperCase() + w.slice(1);
-    });
-    const res = parts.join(' ').trim();
+  if (intern && !isHexOrUuid(intern)) {
+    const res = normalizeModelSlug(intern);
     if (res) return res;
   }
   return '';
@@ -115,6 +288,7 @@ function extractConvModelMap(convDbPath) {
         const isLast = filePos >= stat.size;
         const scanEnd = isLast ? totalLen : totalLen - MARGIN;
         let offset = carryLen > 0 ? Math.max(0, carryLen - MARGIN) : 0;
+        let prevLsiEnd = offset;
         while (offset < scanEnd) {
           const idx = chunkBuf.indexOf(needleLsi, offset);
           if (idx === -1 || idx >= scanEnd) break;
@@ -125,26 +299,27 @@ function extractConvModelMap(convDbPath) {
               const stepStr = chunkBuf.slice(pos + 1, pos + 1 + vlen).toString('latin1');
               if (/^\d+$/.test(stepStr)) {
                 let rawInternal = '';
-                const intStart = Math.max(0, idx - 650);
+                const intStart = Math.max(prevLsiEnd, idx - 650);
                 for (let k = intStart; k <= idx - 3; k++) {
                   if (chunkBuf[k] === 0x9a && chunkBuf[k + 1] === 0x01) {
                     const mlen = chunkBuf[k + 2];
-                    if (mlen >= 4 && mlen <= 64 && k + 3 + mlen <= idx) {
+                    if (mlen >= 4 && mlen <= 120 && k + 3 + mlen <= idx) {
                       const s = chunkBuf.slice(k + 3, k + 3 + mlen).toString('utf8');
-                      if (/^[a-z][a-z0-9._-]+$/i.test(s) && !/^[0-9a-f]{16,64}$/i.test(s)) {
+                      if (/^[a-z][a-z0-9._/@-]+$/i.test(s) && !isHexOrUuid(s)) {
                         rawInternal = s;
                       }
                     }
                   }
                 }
                 let rawDisplay = '';
-                const winEnd = Math.min(totalLen, idx + 650);
-                for (let k = idx + needleLsi.length; k <= winEnd - 3; k++) {
+                const nextIdx = chunkBuf.indexOf(needleLsi, pos);
+                const winEnd = Math.min(totalLen, idx + 650, nextIdx !== -1 ? nextIdx : totalLen);
+                for (let k = pos; k <= winEnd - 3; k++) {
                   if (chunkBuf[k] === 0xaa && chunkBuf[k + 1] === 0x01) {
                     const dlen = chunkBuf[k + 2];
-                    if (dlen >= 4 && dlen <= 64 && k + 3 + dlen <= winEnd) {
+                    if (dlen >= 4 && dlen <= 120 && k + 3 + dlen <= winEnd) {
                       const s = chunkBuf.slice(k + 3, k + 3 + dlen).toString('utf8');
-                      if (/^[A-Za-z][A-Za-z0-9 ._()\-+/]+$/.test(s) && !/^[0-9a-f]{16,64}$/i.test(s)) {
+                      if (/^[A-Za-z][A-Za-z0-9 ._()\-+/]+$/.test(s) && !isHexOrUuid(s)) {
                         rawDisplay = s;
                         break;
                       }
@@ -159,7 +334,8 @@ function extractConvModelMap(convDbPath) {
               }
             }
           }
-          offset = idx + needleLsi.length;
+          prevLsiEnd = pos;
+          offset = pos;
         }
         if (isLast) break;
         carryLen = Math.min(KEEP, totalLen);
@@ -196,7 +372,26 @@ function resolveStepModel(stepIdx, modelInfo, fallbackModel) {
     }
     return modelInfo.stepMap[chosen];
   }
-  return (modelInfo && modelInfo.defaultModel) || fallbackModel || '其他模型';
+  const fb = fallbackModel ? (normalizeModelName(fallbackModel, '') || String(fallbackModel).trim()) : '';
+  return (modelInfo && modelInfo.defaultModel) || fb || '其他模型';
+}
+
+function isConvEntryNewer(candidate, current) {
+  if (!candidate || typeof candidate !== 'object' || typeof candidate.mtimeMs !== 'number') {
+    return false;
+  }
+  if (!current || typeof current !== 'object' || typeof current.mtimeMs !== 'number') {
+    return true;
+  }
+  if (candidate.mtimeMs !== current.mtimeMs) {
+    return candidate.mtimeMs > current.mtimeMs;
+  }
+  const candSize = Number(candidate.size) || 0;
+  const curSize = Number(current.size) || 0;
+  if (candSize !== curSize) {
+    return candSize > curSize;
+  }
+  return (Number(candidate.dbSize) || 0) > (Number(current.dbSize) || 0);
 }
 
 function resolveTranscriptPath(rawPath, convId) {
@@ -204,9 +399,10 @@ function resolveTranscriptPath(rawPath, convId) {
   if (normalized && fs.existsSync(normalized)) {
     return normalized;
   }
-  if (!convId) return '';
+  if (!convId || !/^[a-zA-Z0-9_-]+$/.test(convId)) return '';
+  const cliHome = getCliHomeDir();
   const candidates = [
-    path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl'),
+    path.join(cliHome, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl'),
     path.join(os.homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl'),
   ];
   for (const c of candidates) {
@@ -256,11 +452,11 @@ function parseTranscriptStats(transcriptPath, convId, fallbackModel) {
       return null;
     }
     const stat = fs.statSync(transcriptPath);
-    const raw = fs.readFileSync(transcriptPath, 'utf8');
-    const lines = raw.split('\n');
+    const raw = stripBom(fs.readFileSync(transcriptPath, 'utf8'));
+    const lines = raw.split(/\r?\n/);
     const rows = [];
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
+      const line = stripBom(lines[i]).trim();
       if (!line) continue;
       try {
         rows.push(JSON.parse(line));
@@ -272,8 +468,13 @@ function parseTranscriptStats(transcriptPath, convId, fallbackModel) {
     let modelInfo = null;
     const resolvedConvId = typeof convId === 'string' && /^[a-zA-Z0-9_-]+$/.test(convId) ? convId : null;
     if (resolvedConvId) {
-      const cliConvDbPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'conversations', `${resolvedConvId}.db`);
-      modelInfo = extractConvModelMap(cliConvDbPath);
+      const cliHome = getCliHomeDir();
+      const cliConvDbPath = path.join(cliHome, 'conversations', `${resolvedConvId}.db`);
+      const desktopConvDbPath = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations', `${resolvedConvId}.db`);
+      const hasCliDb = fs.existsSync(cliConvDbPath) || fs.existsSync(`${cliConvDbPath}-wal`);
+      const hasDesktopDb = fs.existsSync(desktopConvDbPath) || fs.existsSync(`${desktopConvDbPath}-wal`);
+      const convDbPath = hasCliDb ? cliConvDbPath : (hasDesktopDb ? desktopConvDbPath : cliConvDbPath);
+      modelInfo = extractConvModelMap(convDbPath);
     }
 
     let sumInputTokens = 0;
@@ -376,15 +577,31 @@ function parseTranscriptStats(transcriptPath, convId, fallbackModel) {
   }
 }
 
+function readJsonObjectSync(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = stripBom(fs.readFileSync(filePath, 'utf8')).trim();
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return null;
+  }
+}
+
 function updateAndReadSpeedCache(convId, totalOutTokens, transcriptSpeed) {
   if (!convId) return transcriptSpeed || 0;
+  const lockPath = `${SPEED_CACHE_PATH}.lock`;
+  let hasLock = false;
   try {
-    let cache = {};
-    if (fs.existsSync(SPEED_CACHE_PATH)) {
-      cache = JSON.parse(fs.readFileSync(SPEED_CACHE_PATH, 'utf8')) || {};
+    const cacheDir = path.dirname(SPEED_CACHE_PATH);
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
     }
+    hasLock = acquireFileLockSync(lockPath, 400);
+    const cache = readJsonObjectSync(SPEED_CACHE_PATH) || {};
     const now = Date.now();
-    const prev = cache[convId] || {};
+    const prev = cache[convId] && typeof cache[convId] === 'object' ? cache[convId] : {};
     let speed = transcriptSpeed > 0 ? transcriptSpeed : (prev.speed || 0);
 
     if (totalOutTokens > 0 && prev.outTokens > 0 && totalOutTokens > prev.outTokens && prev.ts > 0) {
@@ -407,10 +624,33 @@ function updateAndReadSpeedCache(convId, totalOutTokens, transcriptSpeed) {
       ts: totalOutTokens !== prev.outTokens ? now : (prev.ts || now),
       speed,
     };
-    fs.writeFileSync(SPEED_CACHE_PATH, JSON.stringify(cache), 'utf8');
+    atomicWriteFileSync(SPEED_CACHE_PATH, JSON.stringify(cache));
     return speed;
   } catch {
     return transcriptSpeed || 0;
+  } finally {
+    if (hasLock) {
+      releaseFileLockSync(lockPath);
+    }
+  }
+}
+
+function readActivityCacheSync(activityCachePath) {
+  if (!fs.existsSync(activityCachePath)) {
+    return { status: 'missing', cache: { version: 4, conversations: {} } };
+  }
+  const raw = stripBom(fs.readFileSync(activityCachePath, 'utf8')).trim();
+  if (!raw) {
+    return { status: 'empty', cache: { version: 4, conversations: {} } };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.version === 4 && parsed.conversations && typeof parsed.conversations === 'object') {
+      return { status: 'ok', cache: { version: 4, conversations: { ...parsed.conversations } } };
+    }
+    return { status: 'reset', cache: { version: 4, conversations: {} } };
+  } catch {
+    return { status: 'corrupt', cache: null };
   }
 }
 
@@ -419,37 +659,25 @@ function syncActivityLedgerCache(convId, tStats) {
     return;
   }
   try {
-    let cache = { version: 4, conversations: {} };
-    if (fs.existsSync(ACTIVITY_CACHE_PATH)) {
-      const raw = fs.readFileSync(ACTIVITY_CACHE_PATH, 'utf8');
-      if (raw && raw.trim()) {
-        let parsed;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          return;
-        }
-        if (parsed && typeof parsed === 'object' && parsed.version === 4 && parsed.conversations && typeof parsed.conversations === 'object') {
-          cache = { version: 4, conversations: parsed.conversations };
-        }
+    const activityCachePath = getActivityCachePath();
+    const key = `cli:${convId}`;
+    const targetDbSize = Number(tStats.dbSize) || 0;
+    const initialRead = readActivityCacheSync(activityCachePath);
+    if (initialRead.status === 'ok') {
+      const prev = initialRead.cache.conversations[key];
+      if (
+        prev &&
+        prev.mtimeMs === tStats.statMtimeMs &&
+        prev.size === tStats.statSize &&
+        (Number(prev.dbSize) || 0) === targetDbSize &&
+        prev.daily &&
+        typeof prev.daily === 'object'
+      ) {
+        return;
       }
     }
 
-    const key = `cli:${convId}`;
-    const prev = cache.conversations[key];
-    const targetDbSize = Number(tStats.dbSize) || 0;
-    if (
-      prev &&
-      prev.mtimeMs === tStats.statMtimeMs &&
-      prev.size === tStats.statSize &&
-      prev.dbSize === targetDbSize &&
-      prev.daily &&
-      typeof prev.daily === 'object'
-    ) {
-      return;
-    }
-
-    cache.conversations[key] = {
+    const newEntry = {
       mtimeMs: tStats.statMtimeMs,
       size: tStats.statSize,
       dbSize: targetDbSize,
@@ -457,26 +685,41 @@ function syncActivityLedgerCache(convId, tStats) {
       daily: tStats.dailyBuckets,
     };
 
-    const cacheDir = path.dirname(ACTIVITY_CACHE_PATH);
+    const cacheDir = path.dirname(activityCachePath);
     if (!fs.existsSync(cacheDir)) {
       fs.mkdirSync(cacheDir, { recursive: true });
     }
-    const payload = JSON.stringify(cache);
-    const tmpPath = `${ACTIVITY_CACHE_PATH}.${process.pid}.${Date.now()}.tmp`;
+    const lockPath = `${activityCachePath}.lock`;
+    const hasLock = acquireFileLockSync(lockPath, 1000);
     try {
-      fs.writeFileSync(tmpPath, payload, 'utf8');
-      try {
-        fs.renameSync(tmpPath, ACTIVITY_CACHE_PATH);
-      } catch {
-        fs.writeFileSync(ACTIVITY_CACHE_PATH, payload, 'utf8');
+      let latestRead = readActivityCacheSync(activityCachePath);
+      if (latestRead.status === 'corrupt') {
+        sleepSyncMs(20);
+        latestRead = readActivityCacheSync(activityCachePath);
       }
+      if (latestRead.status === 'corrupt' || !latestRead.cache) {
+        return;
+      }
+      const cache = latestRead.cache;
+      const latestSelf = cache.conversations[key];
+      if (isConvEntryNewer(latestSelf, newEntry)) {
+        return;
+      }
+      if (
+        latestSelf &&
+        latestSelf.mtimeMs === newEntry.mtimeMs &&
+        Number(latestSelf.size) === Number(newEntry.size) &&
+        (Number(latestSelf.dbSize) || 0) === targetDbSize &&
+        latestSelf.daily &&
+        typeof latestSelf.daily === 'object'
+      ) {
+        return;
+      }
+      cache.conversations[key] = newEntry;
+      atomicWriteFileSync(activityCachePath, JSON.stringify(cache));
     } finally {
-      try {
-        if (fs.existsSync(tmpPath)) {
-          fs.unlinkSync(tmpPath);
-        }
-      } catch {
-        // ignore cleanup error
+      if (hasLock) {
+        releaseFileLockSync(lockPath);
       }
     }
   } catch {
@@ -484,36 +727,59 @@ function syncActivityLedgerCache(convId, tStats) {
   }
 }
 
+function extractEffortFromLabel(label) {
+  const str = String(label || '').trim();
+  const m = str.match(/\(\s*(Extra\s+Low|Very\s+High|XHigh|High|Medium|Low|Max)\s*\)(?:\s*\([^)]+\))*\s*$/i);
+  return m ? m[1].replace(/\s+/g, ' ').toLowerCase() : '';
+}
+
+function extractEffortFromSlug(slug) {
+  let s = String(slug || '').trim().replace(/@.*$/, '');
+  s = s.replace(/-(?:maas|1m|2m|128k|200k|256k|512k|1000k)$/i, '');
+  const m = s.match(/-(extra[-_]low|very[-_]high|xhigh|high|medium|low|max)$/i);
+  return m ? m[1].replace(/[-_]+/g, ' ').toLowerCase() : '';
+}
+
 function resolveModelLabel(data) {
-  let displayName = (data.model && data.model.display_name) || '';
-  let effort = (data.model && data.model.effort) || '';
+  const modelObj = data && data.model && typeof data.model === 'object' ? data.model : null;
+  const rawDisplay = modelObj && typeof modelObj.display_name === 'string'
+    ? modelObj.display_name.trim()
+    : (typeof (data && data.model) === 'string' ? data.model.trim() : '');
+  const rawId = modelObj && typeof modelObj.id === 'string' ? modelObj.id.trim() : '';
+  let effort = modelObj && typeof modelObj.effort === 'string' ? modelObj.effort.trim() : '';
 
-  if (!displayName) {
-    try {
-      const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
-      if (fs.existsSync(settingsPath)) {
-        const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        if (typeof s.model === 'string') {
-          displayName = s.model;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  if (!displayName) {
-    displayName = 'Gemini 4 Argon';
-  }
-
-  const match = displayName.match(/^(.*?)\s*\((Low|Medium|High|Max)\)\s*$/i);
-  if (match) {
-    displayName = match[1].trim();
+  let displayName = '';
+  if (rawDisplay) {
     if (!effort) {
-      effort = match[2].toLowerCase();
+      effort = extractEffortFromLabel(rawDisplay) || extractEffortFromSlug(rawDisplay);
+    }
+    displayName = normalizeModelName(rawDisplay, '');
+  }
+
+  if (!displayName && rawId) {
+    if (!effort) {
+      effort = extractEffortFromSlug(rawId);
+    }
+    displayName = normalizeModelName('', rawId);
+  } else if (displayName && !effort && rawId) {
+    effort = extractEffortFromSlug(rawId);
+  }
+
+  if (!displayName) {
+    const settingsModel = readSettingsModel();
+    if (settingsModel) {
+      if (!effort) {
+        effort = extractEffortFromLabel(settingsModel) || extractEffortFromSlug(settingsModel);
+      }
+      displayName = normalizeModelName(settingsModel, '');
     }
   }
 
-  const cleanEffort = String(effort || '').trim().toLowerCase();
+  if (!displayName) {
+    return '';
+  }
+
+  const cleanEffort = String(effort || '').trim().replace(/_/g, ' ').replace(/\s+/g, ' ').toLowerCase();
   return cleanEffort ? `${displayName} · ${cleanEffort}` : displayName;
 }
 
@@ -538,21 +804,23 @@ function renderSingleLine(data, speed, usedTokens, pct, cacheHit, totalTokens) {
   const ringChar = getRingChar(pct);
   const ctxStr = `${formatCompactTokens(usedTokens)} / 1M ${pct}%`;
   const cacheStr = `${cacheHit}%`;
-  const totalStrPadded = formatCompactTokens(totalTokens).padEnd(5, ' ');
+  const totalStr = modelText
+    ? formatCompactTokens(totalTokens).padEnd(5, ' ')
+    : formatCompactTokens(totalTokens);
 
   const telemetryPlain =
     `↯ ${speedStr}  ·  ` +
     `${ringChar} ${ctxStr}  ·  ` +
     `◈ ${cacheStr}  ·  ` +
-    `∑ ${totalStrPadded}`;
+    `∑ ${totalStr}`;
 
   const telemetryAnsi =
     `${FG}↯ ${speedStr}${DOT}  ·  ` +
     `${FG}${ringChar} ${ctxStr}${DOT}  ·  ` +
     `${FG}◈ ${cacheStr}${DOT}  ·  ` +
-    `${FG}∑ ${totalStrPadded}${RST}`;
+    `${FG}∑ ${totalStr}${RST}`;
 
-  const gapBeforeModel = '   ';
+  const gapBeforeModel = modelText ? '   ' : '';
   const rightVisibleCols = telemetryPlain.length + gapBeforeModel.length + modelText.length;
 
   const termWidth = Number(data.terminal_width) || Number(process.stdout.columns) || 120;
@@ -562,13 +830,12 @@ function renderSingleLine(data, speed, usedTokens, pct, cacheHit, totalTokens) {
     `${NATIVE}${leftText}${RST}` +
     ' '.repeat(centerSpaces) +
     telemetryAnsi +
-    gapBeforeModel +
-    `${NATIVE}${modelText}${RST}`
+    (modelText ? `${gapBeforeModel}${NATIVE}${modelText}${RST}` : '')
   );
 }
 
 function runWithInput(rawInput) {
-  const input = String(rawInput || '').replace(/^\uFEFF/, '').trim();
+  const input = stripBom(rawInput || '').trim();
   let data = {};
   if (input) {
     try {
@@ -581,19 +848,13 @@ function runWithInput(rawInput) {
   const convId = data.conversation_id || data.session_id || '';
   const rawDisplayName = (data.model && data.model.display_name) || '';
   const rawModelId = (data.model && data.model.id) || '';
-  let fallbackDisplay = rawDisplayName;
-  if (!fallbackDisplay && !rawModelId) {
-    try {
-      const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
-      if (fs.existsSync(settingsPath)) {
-        const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        if (typeof s.model === 'string') {
-          fallbackDisplay = s.model;
-        }
-      }
-    } catch {}
+  let mainModelFallback = normalizeModelName(rawDisplayName, rawModelId);
+  if (!mainModelFallback) {
+    const settingsModel = readSettingsModel();
+    if (settingsModel) {
+      mainModelFallback = normalizeModelName(settingsModel, '');
+    }
   }
-  const mainModelFallback = normalizeModelName(fallbackDisplay, rawModelId);
 
   const transcriptPath = resolveTranscriptPath(data.transcript_path, convId);
   const tStats = parseTranscriptStats(transcriptPath, convId, mainModelFallback);
