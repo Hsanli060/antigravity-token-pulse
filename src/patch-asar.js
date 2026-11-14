@@ -146,7 +146,7 @@ function computeAsarIntegrity(buf, blockSize) {
 }
 
 function readAsarArchive(asarPath) {
-  const bytes = fs.readFileSync(asarPath);
+  const bytes = readFileWithRetry(asarPath);
   if (bytes.length < 16) {
     throw new Error('Invalid or truncated ASAR file: ' + asarPath);
   }
@@ -330,19 +330,55 @@ function checkElectronAsarFuse(exePath) {
   return { found: false, asarIntegrityEnabled: false };
 }
 
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {}
+  }
+}
+
+function readFileWithRetry(filePath, encoding) {
+  const maxRetries = 15;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return encoding ? fs.readFileSync(filePath, encoding) : fs.readFileSync(filePath);
+    } catch (err) {
+      const transient = err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
+      if (!transient || attempt === maxRetries) {
+        throw err;
+      }
+      sleepSync(500);
+    }
+  }
+}
+
 function writeAtomic(targetPath, data) {
   const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmpPath, data);
+  const maxRetries = 15;
   try {
-    fs.renameSync(tmpPath, targetPath);
-  } catch (err) {
-    try {
-      fs.copyFileSync(tmpPath, targetPath);
-    } finally {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      } catch {}
+        fs.renameSync(tmpPath, targetPath);
+        return;
+      } catch (err) {
+        const transient = err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
+        if (!transient || attempt === maxRetries) {
+          if (transient) {
+            fs.copyFileSync(tmpPath, targetPath);
+            return;
+          }
+          throw err;
+        }
+        sleepSync(500);
+      }
     }
+  } finally {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
   }
 }
 
@@ -353,8 +389,8 @@ function patchExtractedDir(extractDir, opts) {
     throw new Error('Missing dist/ipcHandlers.js or dist/preload.js inside: ' + extractDir);
   }
 
-  const rawIpc = fs.readFileSync(ipcPath, 'utf8');
-  const rawPre = fs.readFileSync(preloadPath, 'utf8');
+  const rawIpc = readFileWithRetry(ipcPath, 'utf8');
+  const rawPre = readFileWithRetry(preloadPath, 'utf8');
 
   if (opts.restore) {
     const cleanIpc = stripIpcPatch(rawIpc);
@@ -399,9 +435,8 @@ function patchAsarArchive(asarPath, opts) {
   }
 
   if (opts.restore && fs.existsSync(bakPath)) {
-    readAsarArchive(bakPath);
-    const bakBuf = fs.readFileSync(bakPath);
-    writeAtomic(asarPath, bakBuf);
+    const bakInfo = readAsarArchive(bakPath);
+    writeAtomic(asarPath, bakInfo.bytes);
     console.log('[OK] Restored app.asar from backup:', bakPath);
     return;
   }

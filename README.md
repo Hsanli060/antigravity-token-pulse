@@ -57,7 +57,7 @@
 3. 等待 1~2 秒自动注入并重启 Antigravity 2.0，即可看到遥测栏；点击遥测栏随时打开 Token 活动热力图面板。
 
 ### 方式二：仅下载单个安装脚本
-1. 右键「另存为」下载 [`Antigravity-Telemetry-Installer.bat`](https://raw.githubusercontent.com/Hsanli060/antigravity-token-pulse/main/Antigravity-Telemetry-Installer.bat)（保留 `.bat` 后缀；仓库已配置 `.gitattributes` 强制 `*.bat` 为标准 CRLF 行尾，避免 `cmd.exe` 执行异常）
+1. 右键「另存为」下载 [`Antigravity-Telemetry-Installer.bat`](https://raw.githubusercontent.com/Hsanli060/antigravity-token-pulse/main/Antigravity-Telemetry-Installer.bat)（保留 `.bat` 后缀；仓库已配置 `.gitattributes` 使 `Download ZIP` 与 `git clone` 自动签出标准 CRLF，且脚本第 1 行为纯 ASCII 单行引导头，即使从 Raw 直接下载得到 LF 行尾也可在 `cmd.exe` 下正常执行）
 2. 双击运行即可自动拉取 `src/` 模块、缓存在本地并完成注入。
 
 ### 无交互模式与环境变量（CMD / PowerShell 双示例）
@@ -178,7 +178,7 @@ npx @electron/asar pack app-extracted "$env:LOCALAPPDATA\Programs\Antigravity\re
 
 ```text
 antigravity-token-pulse/
-├── .gitattributes                        # 原样保留 *.bat 的 CRLF（-text 兼容 Raw 与 ZIP）、*.js/*.md 使用 LF
+├── .gitattributes                        # 显式 *.bat/*.cmd 为 CRLF（配合单行引导头兼容 Raw LF 与 ZIP），*.js/*.md 为 LF
 ├── Antigravity-Telemetry-Installer.bat   # 一键安装 / 升级 / 恢复器（离线读取 src/ 或在线镜像拉取）
 ├── src/
 │   ├── patch-asar.js                     # 桌面端 ASAR 独立注入脚本（支持目录与 .asar 原地注入/还原）

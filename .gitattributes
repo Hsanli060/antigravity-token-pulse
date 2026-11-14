@@ -1,5 +1,5 @@
 * text=auto
-# Preserve CRLF verbatim in Git blobs for .bat so raw.githubusercontent.com and ZIP downloads both run cleanly in cmd.exe
-*.bat -text
+*.bat text eol=crlf
+*.cmd text eol=crlf
 *.js text eol=lf
 *.md text eol=lf
