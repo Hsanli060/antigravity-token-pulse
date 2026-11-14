@@ -1,40 +1,61 @@
-@echo off
-setlocal EnableExtensions
-chcp 65001 >nul 2>nul
-set "SELF_BAT=%~f0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$lines=[System.IO.File]::ReadAllLines($env:SELF_BAT,[System.Text.Encoding]::UTF8); $idx=[Array]::IndexOf($lines,'# === PS_SCRIPT_START ==='); if($idx -lt 0){throw 'Invalid installer script'}; Invoke-Expression ($lines[($idx+1)..($lines.Length-1)] -join [char]10)"
-set "PS_EXIT=%ERRORLEVEL%"
-if not "%PS_EXIT%"=="0" (
-  echo.
-  echo [ERROR] Script exited with code %PS_EXIT%.
-)
-if not "%ANTIGRAVITY_SKIP_PAUSE%"=="1" if "%ANTIGRAVITY_INSTALLER_MODE%"=="" if not "%ANTIGRAVITY_NONINTERACTIVE%"=="1" pause
-exit /b %PS_EXIT%
+@echo off & setlocal EnableExtensions & chcp 65001 >nul 2>nul & set "SELF_BAT=%~f0" & powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $lines=[System.IO.File]::ReadAllLines($env:SELF_BAT,[System.Text.Encoding]::UTF8); $idx=[Array]::IndexOf($lines,'# === PS_SCRIPT_START ==='); if($idx -lt 0){throw 'Invalid installer script'}; Invoke-Expression ($lines[($idx+1)..($lines.Length-1)] -join [char]10)" & call exit /b %%ERRORLEVEL%%
 # === PS_SCRIPT_START ===
 $ErrorActionPreference = "Stop"
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
-Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host "  Antigravity 2.0 & CLI 遥测栏 + Token 活动热力图 安装器" -ForegroundColor Cyan
-Write-Host "  - 实时遥测条: 速率(t/s) | 上下文环形图(/ 1M) | 缓存命中率 | 累计消耗" -ForegroundColor DarkCyan
-Write-Host "  - 交互热力图: 点击遥测条展开 Daily / Weekly / Monthly 面板" -ForegroundColor DarkCyan
-Write-Host "  - CLI 同步  : 自动配置 agy statusLine 并共享 Token 账本缓存" -ForegroundColor DarkCyan
-Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host ""
-
-$modeEnv = ""
-if ($env:ANTIGRAVITY_INSTALLER_MODE) {
-    $modeEnv = $env:ANTIGRAVITY_INSTALLER_MODE.Trim().ToLowerInvariant()
-    if ($modeEnv -ne "install" -and $modeEnv -ne "restore") {
-        throw "无效的 ANTIGRAVITY_INSTALLER_MODE: '$modeEnv' (仅支持 install 或 restore)"
-    }
-}
-
 function Read-Utf8NoBom([string]$targetPath) {
     $raw = [System.IO.File]::ReadAllText($targetPath, [System.Text.Encoding]::UTF8)
     if ($null -eq $raw) { return "" }
     return $raw.TrimStart([char]0xFEFF)
+}
+
+function Move-FileWithRetry([string]$sourcePath, [string]$destPath, [int]$maxRetries = 15, [int]$delayMs = 500) {
+    for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        try {
+            Move-Item -LiteralPath $sourcePath -Destination $destPath -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq $maxRetries) {
+                throw "写入目标文件失败 ($destPath): $($_.Exception.Message)。请确认 Antigravity 2.0 已从系统托盘完全退出且无杀毒软件锁定文件后重试。"
+            }
+            if ($attempt -eq 2) {
+                Write-Host "[等待] 文件正被其他进程占用，正在自动重试 ($destPath)..." -ForegroundColor Yellow
+            }
+            Start-Sleep -Milliseconds $delayMs
+        }
+    }
+}
+
+function Copy-FileWithRetry([string]$sourcePath, [string]$destPath, [int]$maxRetries = 15, [int]$delayMs = 500) {
+    for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $sourcePath -Destination $destPath -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq $maxRetries) {
+                throw "复制文件失败 ($sourcePath -> $destPath): $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds $delayMs
+        }
+    }
+}
+
+function Read-BytesWithRetry([string]$sourcePath, [int]$maxRetries = 15, [int]$delayMs = 500) {
+    for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        try {
+            [byte[]]$buf = [System.IO.File]::ReadAllBytes($sourcePath)
+            return ,$buf
+        } catch {
+            if ($attempt -eq $maxRetries) {
+                throw "读取文件失败 ($sourcePath): $($_.Exception.Message)。请确认 Antigravity 2.0 已从系统托盘完全退出且无杀毒软件锁定文件后重试。"
+            }
+            if ($attempt -eq 2) {
+                Write-Host "[等待] 文件正被其他进程占用，正在自动重试 ($sourcePath)..." -ForegroundColor Yellow
+            }
+            Start-Sleep -Milliseconds $delayMs
+        }
+    }
 }
 
 function Write-Utf8NoBom([string]$targetPath, [string]$text) {
@@ -46,7 +67,7 @@ function Write-Utf8NoBom([string]$targetPath, [string]$text) {
     $enc = New-Object System.Text.UTF8Encoding($false)
     try {
         [System.IO.File]::WriteAllText($tmp, $text, $enc)
-        Move-Item -LiteralPath $tmp -Destination $targetPath -Force
+        Move-FileWithRetry $tmp $targetPath
     } finally {
         if (Test-Path -LiteralPath $tmp) {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -62,7 +83,7 @@ function Write-BytesAtomic([string]$targetPath, [byte[]]$data) {
     $tmp = $targetPath + ".tmp." + [Guid]::NewGuid().ToString("N")
     try {
         [System.IO.File]::WriteAllBytes($tmp, $data)
-        Move-Item -LiteralPath $tmp -Destination $targetPath -Force
+        Move-FileWithRetry $tmp $targetPath
     } finally {
         if (Test-Path -LiteralPath $tmp) {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -77,8 +98,8 @@ function Copy-FileAtomic([string]$sourcePath, [string]$destPath) {
     }
     $tmp = $destPath + ".tmp." + [Guid]::NewGuid().ToString("N")
     try {
-        Copy-Item -LiteralPath $sourcePath -Destination $tmp -Force
-        Move-Item -LiteralPath $tmp -Destination $destPath -Force
+        Copy-FileWithRetry $sourcePath $tmp
+        Move-FileWithRetry $tmp $destPath
     } finally {
         if (Test-Path -LiteralPath $tmp) {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -159,7 +180,7 @@ function New-AsarJsonSerializer {
 }
 
 function Read-AsarInfo([string]$path) {
-    $bytes = [System.IO.File]::ReadAllBytes($path)
+    [byte[]]$bytes = Read-BytesWithRetry $path
     if ($bytes.Length -lt 16) {
         throw "ASAR 文件损坏或长度不足: $path"
     }
@@ -607,7 +628,24 @@ function Show-IdeDistinctionNotice([string[]]$ideDirs) {
     Write-Host "       本桌面端 ASAR 注入仅适用于 Antigravity 2.0；若你同时使用 agy CLI，脚本将继续检查 CLI 状态栏配置。" -ForegroundColor Yellow
 }
 
-$IPC_BLOCK = (Get-ModResource "ipc-block.js") + "`n"
+function Invoke-InstallerMain {
+    Write-Host "=============================================================" -ForegroundColor Cyan
+    Write-Host "  Antigravity 2.0 & CLI 遥测栏 + Token 活动热力图 安装器" -ForegroundColor Cyan
+    Write-Host "  - 实时遥测条: 速率(t/s) | 上下文环形图(/ 1M) | 缓存命中率 | 累计消耗" -ForegroundColor DarkCyan
+    Write-Host "  - 交互热力图: 点击遥测条展开 Daily / Weekly / Monthly 面板" -ForegroundColor DarkCyan
+    Write-Host "  - CLI 同步  : 自动配置 agy statusLine 并共享 Token 账本缓存" -ForegroundColor DarkCyan
+    Write-Host "=============================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $modeEnv = ""
+    if ($env:ANTIGRAVITY_INSTALLER_MODE) {
+        $modeEnv = $env:ANTIGRAVITY_INSTALLER_MODE.Trim().ToLowerInvariant()
+        if ($modeEnv -ne "install" -and $modeEnv -ne "restore") {
+            throw "无效的 ANTIGRAVITY_INSTALLER_MODE: '$modeEnv' (仅支持 install 或 restore)"
+        }
+    }
+
+    $IPC_BLOCK = (Get-ModResource "ipc-block.js") + "`n"
 $PRELOAD_BLOCK = (@(
     (Get-ModResource "preload-part1.js"),
     (Get-ModResource "preload-part2.js"),
@@ -828,17 +866,31 @@ if ($asarPath) {
 
     if ($needModifyAsar -and (-not $env:ANTIGRAVITY_ASAR_PATH)) {
         $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        $procs = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId })
+        $installRootDir = (Split-Path -Parent $resourcesDir).TrimEnd('\') + '\'
+        $findTargetProcs = {
+            @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                if ($_.SessionId -ne $currentSessionId) { return $false }
+                if ($_.ProcessName -eq "Antigravity") { return $true }
+                try {
+                    if ($_.Path -and $_.Path.StartsWith($installRootDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $true
+                    }
+                } catch {}
+                return $false
+            })
+        }
+
+        $procs = & $findTargetProcs
         if ($procs.Count -gt 0) {
             $wasRunning = $true
             foreach ($p in $procs) {
                 try {
-                    if ($p.Path) { $exePath = $p.Path; break }
+                    if ($p.ProcessName -eq "Antigravity" -and $p.Path) { $exePath = $p.Path; break }
                 } catch {}
             }
-            Write-Host "[关闭] 正在临时关闭当前会话中的 Antigravity 2.0 进程以解除文件占用..." -ForegroundColor Yellow
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-                $procs = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId })
+            Write-Host "[关闭] 正在临时关闭当前会话中的 Antigravity 2.0 及其子进程以解除文件占用..." -ForegroundColor Yellow
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+                $procs = & $findTargetProcs
                 if ($procs.Count -eq 0) { break }
                 try {
                     $procs | Stop-Process -Force -ErrorAction Stop
@@ -847,17 +899,17 @@ if ($asarPath) {
                     if ($_.Exception -is [System.UnauthorizedAccessException] -or $msg -match 'Access is denied|拒绝访问') {
                         throw "无法关闭正在运行的 Antigravity 2.0 进程（拒绝访问 / 权限不足）。请先手动完全退出 Antigravity 2.0，或右键本脚本「以管理员身份运行」后重试。"
                     }
-                    if ($attempt -eq 3) {
+                    if ($attempt -eq 5) {
                         throw "关闭 Antigravity 2.0 进程失败: $msg 。请先手动退出客户端后重试。"
                     }
                 }
                 $pids = @($procs | ForEach-Object { $_.Id })
                 if ($pids.Count -gt 0) {
-                    Wait-Process -Id $pids -Timeout 8 -ErrorAction SilentlyContinue
+                    Wait-Process -Id $pids -Timeout 10 -ErrorAction SilentlyContinue
                 }
-                Start-Sleep -Milliseconds 300
+                Start-Sleep -Milliseconds 500
             }
-            $leftover = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId })
+            $leftover = & $findTargetProcs
             if ($leftover.Count -gt 0) {
                 throw "Antigravity 2.0 进程未能在预期时间内退出，请手动从系统托盘完全退出后重试。"
             }
@@ -865,17 +917,17 @@ if ($asarPath) {
     }
 
     if ($needModifyAsar) {
-        # 等待潜在的文件锁释放
-        for ($w = 0; $w -lt 10; $w++) {
+        # 等待子进程/杀软释放文件写入锁（最多 15 次 × 500ms）
+        for ($w = 0; $w -lt 15; $w++) {
             try {
                 $testFs = [System.IO.File]::Open($asarPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
                 $testFs.Dispose()
                 break
             } catch {
-                if ($w -eq 9) {
+                if ($w -eq 14) {
                     throw "目标文件被占用且无法获得写入锁: $asarPath 。请先关闭 Antigravity 2.0 后重试。"
                 }
-                Start-Sleep -Milliseconds 300
+                Start-Sleep -Milliseconds 500
             }
         }
     }
@@ -952,7 +1004,13 @@ if ($asarPath) {
             } finally {
                 $fsOut.Dispose()
             }
-            Move-Item -LiteralPath $outAsarTmp -Destination $asarPath -Force
+            try {
+                Move-FileWithRetry $outAsarTmp $asarPath
+            } finally {
+                if (Test-Path -LiteralPath $outAsarTmp) {
+                    Remove-Item -LiteralPath $outAsarTmp -Force -ErrorAction SilentlyContinue
+                }
+            }
             Write-Host "[OK] 已从 app.asar 剥离遥测注入块！" -ForegroundColor Green
         } else {
             Write-Host "[跳过] 当前 app.asar 未检测到遥测补丁，无需恢复。" -ForegroundColor Gray
@@ -1048,7 +1106,7 @@ if ($asarPath) {
             $fsOut.Dispose()
         }
         try {
-            Move-Item -LiteralPath $outAsarTmp -Destination $asarPath -Force
+            Move-FileWithRetry $outAsarTmp $asarPath
         } finally {
             if (Test-Path -LiteralPath $outAsarTmp) {
                 Remove-Item -LiteralPath $outAsarTmp -Force -ErrorAction SilentlyContinue
@@ -1160,7 +1218,35 @@ if ($actionMode -eq "restore") {
 }
 Write-Host "=============================================================" -ForegroundColor Green
 
-if ($asarPath -and (-not $skipAsarDueToFuse) -and (-not $env:ANTIGRAVITY_ASAR_PATH) -and $wasRunning -and $exePath -and (Test-Path -LiteralPath $exePath)) {
-    Start-Process -FilePath $exePath
-    Write-Host "[OK] 已为您自动重新打开 Antigravity 2.0！" -ForegroundColor Cyan
+    if ($asarPath -and (-not $skipAsarDueToFuse) -and (-not $env:ANTIGRAVITY_ASAR_PATH) -and $wasRunning -and $exePath -and (Test-Path -LiteralPath $exePath)) {
+        Start-Process -FilePath $exePath
+        Write-Host "[OK] 已为您自动重新打开 Antigravity 2.0！" -ForegroundColor Cyan
+    }
 }
+
+$installerExitCode = 0
+$installerErrorMsg = ""
+try {
+    Invoke-InstallerMain
+} catch {
+    $installerExitCode = 1
+    $installerErrorMsg = $_.Exception.Message
+} finally {
+    if ($installerExitCode -ne 0 -and $installerErrorMsg) {
+        Write-Host ""
+        Write-Host "[ERROR] $installerErrorMsg" -ForegroundColor Red
+    }
+    $skipPause = ($env:ANTIGRAVITY_SKIP_PAUSE -eq "1") -or
+                 (-not [string]::IsNullOrWhiteSpace($env:ANTIGRAVITY_INSTALLER_MODE)) -or
+                 ($env:ANTIGRAVITY_NONINTERACTIVE -eq "1")
+    if (-not $skipPause) {
+        Write-Host ""
+        try {
+            if (-not [Console]::IsInputRedirected) {
+                Write-Host "按任意键退出..." -ForegroundColor DarkGray
+                [void][Console]::ReadKey($true)
+            }
+        } catch {}
+    }
+}
+exit $installerExitCode
