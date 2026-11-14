@@ -1,0 +1,880 @@
+// === TELEMETRY_MOD_PRELOAD_START ===
+function installTelemetryBar() {
+const g = globalThis;
+if (!g.document || (g.top && g.self && g.top !== g.self)) {
+return;
+}
+const electronObj = typeof electron_1 !== 'undefined' ? electron_1 : require('electron');
+const STYLE_ID = 'agy-custom-telemetry-style';
+const MODAL_STYLE_ID = 'agy-token-activity-style';
+const MODAL_ID = 'agy-token-activity-modal';
+const BAR_CLASS = 'agy-custom-telemetry-bar';
+const RING_CIRCUMFERENCE = 37.6991; // 2 * Math.PI * 6
+function ensureStyles() {
+if (g.document.getElementById(STYLE_ID)) {
+return;
+}
+const style = g.document.createElement('style');
+style.id = STYLE_ID;
+style.textContent = `
+.${BAR_CLASS} {
+display: inline-flex;
+align-items: center;
+margin-left: 14px;
+padding: 2px 6px;
+border-radius: 5px;
+font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+font-size: 12px;
+font-weight: 400;
+line-height: 1;
+color: #91919C;
+white-space: nowrap;
+user-select: none;
+pointer-events: auto;
+cursor: pointer;
+flex-shrink: 0;
+font-variant-numeric: tabular-nums;
+font-feature-settings: "tnum" 1;
+transition: background 0.15s ease, color 0.15s ease;
+}
+.${BAR_CLASS}:hover {
+background: rgba(255,255,255,0.08);
+color: #D4D4E0;
+}
+.${BAR_CLASS}:hover .agy-tm-pri,
+.${BAR_CLASS}:hover .agy-tm-sec {
+color: #D4D4E0;
+}
+.${BAR_CLASS} .agy-tm-item {
+display: inline-flex;
+align-items: center;
+flex-shrink: 0;
+}
+.${BAR_CLASS} .agy-tm-pri {
+color: #91919C;
+font-weight: 400;
+font-variant-numeric: tabular-nums;
+font-feature-settings: "tnum" 1;
+transition: color 0.15s ease;
+}
+.${BAR_CLASS} .agy-tm-sec {
+color: #91919C;
+font-weight: 400;
+font-variant-numeric: tabular-nums;
+font-feature-settings: "tnum" 1;
+transition: color 0.15s ease;
+}
+.${BAR_CLASS} .agy-tm-dot {
+color: #767886;
+font-weight: 400;
+margin: 0 10px;
+flex-shrink: 0;
+}
+`;
+(g.document.head || g.document.documentElement).appendChild(style);
+}
+function ensureModalStyles() {
+if (g.document.getElementById(MODAL_STYLE_ID)) {
+return;
+}
+const style = g.document.createElement('style');
+style.id = MODAL_STYLE_ID;
+style.textContent = `
+#${MODAL_ID}, #${MODAL_ID} * {
+box-sizing: border-box;
+}
+#${MODAL_ID} {
+position: fixed;
+inset: 0;
+z-index: 2147483640;
+background: rgba(10, 10, 16, 0.58);
+backdrop-filter: blur(4px);
+display: flex;
+align-items: center;
+justify-content: center;
+font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+font-variant-numeric: tabular-nums;
+font-feature-settings: "tnum" 1;
+color: #E8E8F0;
+user-select: none;
+}
+#${MODAL_ID} .agy-ta-card {
+width: 800px;
+max-width: 94vw;
+max-height: 90vh;
+display: flex;
+flex-direction: column;
+overflow-y: auto;
+background: #22222C;
+border: 1px solid rgba(255, 255, 255, 0.1);
+border-radius: 14px;
+padding: 22px 26px;
+color: #E8E8F0;
+box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+cursor: default;
+}
+#${MODAL_ID} .agy-ta-header {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 12px;
+flex-wrap: wrap;
+}
+#${MODAL_ID} .agy-ta-title-wrap {
+display: flex;
+align-items: center;
+gap: 10px;
+}
+#${MODAL_ID} .agy-ta-title {
+font-size: 16px;
+font-weight: 600;
+color: #F4F4FA;
+letter-spacing: 0.2px;
+}
+#${MODAL_ID} .agy-ta-badge {
+display: inline-flex;
+align-items: center;
+gap: 5px;
+font-size: 11px;
+font-weight: 500;
+padding: 2px 8px;
+border-radius: 999px;
+background: rgba(186, 74, 152, 0.16);
+color: #F6A5D8;
+border: 1px solid rgba(246, 165, 216, 0.25);
+}
+#${MODAL_ID} .agy-ta-badge-dot {
+width: 6px;
+height: 6px;
+border-radius: 50%;
+background: #F6A5D8;
+}
+#${MODAL_ID} .agy-ta-controls {
+display: flex;
+align-items: center;
+gap: 10px;
+}
+#${MODAL_ID} .agy-ta-tabs {
+display: inline-flex;
+align-items: center;
+gap: 2px;
+padding: 3px;
+border-radius: 8px;
+background: rgba(255, 255, 255, 0.04);
+border: 1px solid rgba(255, 255, 255, 0.08);
+}
+#${MODAL_ID} .agy-ta-tab {
+border: none;
+background: transparent;
+color: #9A9AA8;
+font-family: inherit;
+font-size: 12px;
+font-weight: 500;
+padding: 5px 11px;
+border-radius: 6px;
+cursor: pointer;
+transition: background 0.15s ease, color 0.15s ease;
+outline: none;
+}
+#${MODAL_ID} .agy-ta-tab:hover {
+color: #E8E8F0;
+background: rgba(255, 255, 255, 0.06);
+}
+#${MODAL_ID} .agy-ta-tab.is-active {
+background: rgba(186, 74, 152, 0.28);
+color: #F6A5D8;
+box-shadow: inset 0 0 0 1px rgba(246, 165, 216, 0.28);
+}
+#${MODAL_ID} .agy-ta-close {
+width: 28px;
+height: 28px;
+border-radius: 7px;
+border: none;
+background: transparent;
+color: #91919C;
+font-family: inherit;
+font-size: 18px;
+line-height: 1;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+cursor: pointer;
+transition: background 0.15s ease, color 0.15s ease;
+outline: none;
+}
+#${MODAL_ID} .agy-ta-close:hover {
+background: rgba(255, 255, 255, 0.09);
+color: #FFFFFF;
+}
+#${MODAL_ID} .agy-ta-kpis {
+display: grid;
+grid-template-columns: repeat(4, minmax(0, 1fr));
+gap: 10px;
+margin-top: 16px;
+}
+#${MODAL_ID} .agy-ta-kpi {
+background: rgba(255, 255, 255, 0.03);
+border: 1px solid rgba(255, 255, 255, 0.06);
+border-radius: 10px;
+padding: 11px 13px;
+min-width: 0;
+}
+#${MODAL_ID} .agy-ta-kpi-label {
+font-size: 11px;
+color: #8E8E9E;
+margin-bottom: 5px;
+}
+#${MODAL_ID} .agy-ta-kpi-val {
+font-size: 20px;
+font-weight: 700;
+color: #F4F4FA;
+line-height: 1.2;
+letter-spacing: -0.2px;
+}
+#${MODAL_ID} .agy-ta-kpi-sub {
+font-size: 11px;
+color: #7E7E8E;
+margin-top: 5px;
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+}
+#${MODAL_ID} .agy-ta-heatmap-section {
+margin-top: 16px;
+padding-top: 14px;
+border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+#${MODAL_ID} .agy-ta-section-head {
+display: flex;
+align-items: center;
+justify-content: space-between;
+margin-bottom: 10px;
+gap: 8px;
+}
+#${MODAL_ID} .agy-ta-section-title {
+font-size: 12px;
+font-weight: 500;
+color: #B4B4C4;
+}
+#${MODAL_ID} .agy-ta-legend {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+font-size: 11px;
+color: #7E7E8E;
+}
+#${MODAL_ID} .agy-ta-legend-sq {
+width: 10px;
+height: 10px;
+border-radius: 2px;
+display: inline-block;
+}
+#${MODAL_ID} .agy-ta-heatmap-scroll {
+overflow-x: auto;
+overflow-y: hidden;
+padding-bottom: 2px;
+}
+#${MODAL_ID} .agy-ta-heatmap-inner {
+width: 739px;
+margin: 0 auto;
+}
+#${MODAL_ID} .agy-ta-heatmap-grid {
+display: flex;
+gap: 3px;
+width: 739px;
+}
+#${MODAL_ID} .agy-ta-week-col {
+display: flex;
+flex-direction: column;
+gap: 3px;
+width: 11px;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-cell {
+width: 11px;
+height: 11px;
+border-radius: 3px;
+background: #2E2E38;
+cursor: pointer;
+transition: transform 0.08s ease;
+}
+#${MODAL_ID} .agy-ta-cell:hover {
+outline: 1px solid rgba(255, 255, 255, 0.55);
+outline-offset: -1px;
+}
+#${MODAL_ID} .agy-ta-cell.is-future {
+visibility: hidden;
+pointer-events: none;
+}
+#${MODAL_ID} .agy-ta-months {
+position: relative;
+width: 739px;
+height: 16px;
+margin-top: 7px;
+}
+#${MODAL_ID} .agy-ta-month-lbl {
+position: absolute;
+top: 0;
+font-size: 11px;
+line-height: 16px;
+color: #7E7E8E;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-breakdown-section {
+margin-top: 14px;
+padding-top: 14px;
+border-top: 1px solid rgba(255, 255, 255, 0.06);
+display: flex;
+flex-direction: column;
+min-height: 0;
+}
+#${MODAL_ID} .agy-ta-src-legend {
+display: inline-flex;
+align-items: center;
+gap: 12px;
+font-size: 11px;
+color: #9A9AA8;
+}
+#${MODAL_ID} .agy-ta-src-item {
+display: inline-flex;
+align-items: center;
+gap: 5px;
+}
+#${MODAL_ID} .agy-ta-src-dot {
+width: 8px;
+height: 8px;
+border-radius: 2px;
+display: inline-block;
+}
+#${MODAL_ID} .agy-ta-bd-controls {
+display: inline-flex;
+align-items: center;
+gap: 10px;
+flex-wrap: wrap;
+}
+#${MODAL_ID} .agy-ta-mode-switch {
+display: inline-flex;
+background: #262631;
+border: 1px solid rgba(255, 255, 255, 0.07);
+border-radius: 7px;
+padding: 2px;
+gap: 2px;
+}
+#${MODAL_ID} .agy-ta-mode-btn {
+appearance: none;
+border: none;
+background: transparent;
+color: #8E8EA0;
+font-size: 11px;
+padding: 2px 8px;
+border-radius: 5px;
+cursor: pointer;
+transition: all 0.15s ease;
+line-height: 1.3;
+font-family: inherit;
+}
+#${MODAL_ID} .agy-ta-mode-btn:hover {
+color: #D4D4E2;
+}
+#${MODAL_ID} .agy-ta-mode-btn.is-active {
+background: rgba(217, 101, 181, 0.22);
+color: #F5B4E0;
+font-weight: 500;
+}
+#${MODAL_ID} .agy-ta-seg-model {
+height: 100%;
+transition: width 0.25s ease;
+}
+#${MODAL_ID} .agy-ta-model-inline {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+flex-wrap: wrap;
+}
+#${MODAL_ID} .agy-ta-model-inline-dot {
+display: inline-block;
+width: 6px;
+height: 6px;
+border-radius: 50%;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-model-list {
+display: flex;
+flex-direction: column;
+gap: 7px;
+margin-top: 2px;
+}
+#${MODAL_ID} .agy-ta-model-item {
+display: flex;
+flex-direction: column;
+gap: 4px;
+}
+#${MODAL_ID} .agy-ta-model-row-head {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 8px;
+font-size: 11px;
+}
+#${MODAL_ID} .agy-ta-model-name {
+display: inline-flex;
+align-items: center;
+gap: 6px;
+color: #E2E2EC;
+font-weight: 500;
+}
+#${MODAL_ID} .agy-ta-model-meta {
+color: #9A9AA8;
+font-size: 10.5px;
+}
+#${MODAL_ID} .agy-ta-breakdown-list {
+max-height: 240px;
+overflow-y: auto;
+display: flex;
+flex-direction: column;
+gap: 8px;
+padding-right: 4px;
+}
+#${MODAL_ID} .agy-ta-breakdown-list::-webkit-scrollbar,
+#${MODAL_ID} .agy-ta-card::-webkit-scrollbar,
+#${MODAL_ID} .agy-ta-heatmap-scroll::-webkit-scrollbar {
+width: 5px;
+height: 5px;
+}
+#${MODAL_ID} .agy-ta-breakdown-list::-webkit-scrollbar-thumb,
+#${MODAL_ID} .agy-ta-card::-webkit-scrollbar-thumb,
+#${MODAL_ID} .agy-ta-heatmap-scroll::-webkit-scrollbar-thumb {
+background: rgba(255, 255, 255, 0.14);
+border-radius: 999px;
+}
+#${MODAL_ID} .agy-ta-row {
+background: rgba(255, 255, 255, 0.025);
+border: 1px solid rgba(255, 255, 255, 0.05);
+border-radius: 8px;
+padding: 9px 12px;
+display: flex;
+flex-direction: column;
+gap: 6px;
+}
+#${MODAL_ID} .agy-ta-row-top {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 10px;
+font-size: 12px;
+}
+#${MODAL_ID} .agy-ta-row-name {
+color: #E2E2EC;
+font-weight: 500;
+display: inline-flex;
+align-items: center;
+gap: 6px;
+}
+#${MODAL_ID} .agy-ta-tag {
+font-size: 10px;
+padding: 1px 6px;
+border-radius: 4px;
+background: rgba(246, 165, 216, 0.14);
+color: #F6A5D8;
+}
+#${MODAL_ID} .agy-ta-row-total {
+font-weight: 600;
+color: #F4F4FA;
+}
+#${MODAL_ID} .agy-ta-bar-track {
+width: 100%;
+height: 6px;
+border-radius: 999px;
+background: rgba(255, 255, 255, 0.06);
+overflow: hidden;
+}
+#${MODAL_ID} .agy-ta-bar-fill {
+height: 100%;
+display: flex;
+border-radius: 999px;
+overflow: hidden;
+transition: width 0.25s ease;
+}
+#${MODAL_ID} .agy-ta-seg-desktop {
+height: 100%;
+background: #D965B5;
+}
+#${MODAL_ID} .agy-ta-seg-cli {
+height: 100%;
+background: #60A5FA;
+}
+#${MODAL_ID} .agy-ta-row-sub {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 8px;
+font-size: 11px;
+color: #848494;
+flex-wrap: wrap;
+}
+#${MODAL_ID} .agy-ta-total-grid {
+display: grid;
+grid-template-columns: repeat(2, minmax(0, 1fr));
+gap: 10px;
+}
+#${MODAL_ID} .agy-ta-panel {
+background: rgba(255, 255, 255, 0.025);
+border: 1px solid rgba(255, 255, 255, 0.06);
+border-radius: 9px;
+padding: 12px 14px;
+display: flex;
+flex-direction: column;
+gap: 10px;
+}
+#${MODAL_ID} .agy-ta-panel-title {
+font-size: 12px;
+font-weight: 600;
+color: #D4D4E2;
+}
+#${MODAL_ID} .agy-ta-comp-item {
+display: flex;
+flex-direction: column;
+gap: 4px;
+}
+#${MODAL_ID} .agy-ta-comp-head {
+display: flex;
+align-items: center;
+justify-content: space-between;
+font-size: 11px;
+color: #A2A2B2;
+}
+#${MODAL_ID} .agy-ta-comp-val {
+color: #EAEAF4;
+font-weight: 500;
+}
+#${MODAL_ID} .agy-ta-comp-track {
+width: 100%;
+height: 6px;
+border-radius: 999px;
+background: rgba(255, 255, 255, 0.06);
+overflow: hidden;
+}
+#${MODAL_ID} .agy-ta-comp-fill {
+height: 100%;
+border-radius: 999px;
+}
+#${MODAL_ID} .agy-ta-empty {
+text-align: center;
+padding: 28px 12px;
+color: #7E7E8E;
+font-size: 12px;
+}
+#${MODAL_ID} .agy-ta-tooltip {
+position: fixed;
+z-index: 2147483645;
+display: none;
+pointer-events: none;
+background: #3B3B48;
+border: 1px solid rgba(255, 255, 255, 0.1);
+border-radius: 10px;
+padding: 8px 12px;
+box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+white-space: nowrap;
+color: #F0F0F7;
+line-height: 1.45;
+}
+#${MODAL_ID} .agy-ta-tt-date {
+font-size: 11px;
+color: #B4B4C6;
+}
+#${MODAL_ID} .agy-ta-tt-total {
+font-size: 13px;
+font-weight: 600;
+color: #FFFFFF;
+margin: 1px 0;
+}
+#${MODAL_ID} .agy-ta-tt-sub {
+font-size: 11px;
+color: #9A9AAC;
+}
+@media (max-width: 680px) {
+#${MODAL_ID} .agy-ta-kpis {
+grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+#${MODAL_ID} .agy-ta-total-grid {
+grid-template-columns: 1fr;
+}
+}
+`;
+(g.document.head || g.document.documentElement).appendChild(style);
+}
+function formatCompactTokens(num) {
+if (num == null || !Number.isFinite(Number(num)) || Number(num) <= 0) {
+return '0';
+}
+const n = Number(num);
+if (n >= 1000000) {
+return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+if (n >= 1000) {
+return Math.round(n / 1000) + 'k';
+}
+return String(Math.round(n));
+}
+function formatActivityTokens(num) {
+const n = Number(num);
+if (!Number.isFinite(n) || n <= 0) {
+return '0';
+}
+if (n >= 1e9) {
+return (n / 1e9).toFixed(2).replace(/\.?0+$/, '') + 'B';
+}
+if (n >= 1e6) {
+return (n / 1e6).toFixed(n >= 100e6 ? 1 : 2).replace(/\.?0+$/, '') + 'M';
+}
+if (n >= 1e3) {
+return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+}
+return String(Math.round(n));
+}
+function escHtml(str) {
+return String(str == null ? '' : str)
+.replace(/&/g, '&amp;')
+.replace(/</g, '&lt;')
+.replace(/>/g, '&gt;')
+.replace(/"/g, '&quot;');
+}
+function calcCachePct(bucket) {
+if (!bucket)
+return 0;
+const inTok = Number(bucket.in) || 0;
+const cacheTok = Number(bucket.cache) || 0;
+const denom = inTok + cacheTok;
+return denom > 0 ? Math.round((cacheTok / denom) * 100) : 0;
+}
+function pad2(n) {
+return String(n).padStart(2, '0');
+}
+function formatDateKey(dt) {
+return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+}
+function getLocalTodayKey() {
+return formatDateKey(new Date());
+}
+function parseDateKeyLocal(dateStr) {
+const parts = String(dateStr || '').split('-');
+if (parts.length !== 3)
+return new Date();
+return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 12, 0, 0);
+}
+function addLocalDays(dt, offsetDays) {
+const next = new Date(dt.getTime());
+next.setDate(next.getDate() + offsetDays);
+return next;
+}
+function getIsoWeekInfo(dateStr) {
+const d = parseDateKeyLocal(dateStr);
+const isoDay = d.getDay() || 7;
+const mon = addLocalDays(d, -(isoDay - 1));
+const sun = addLocalDays(mon, 6);
+const thu = addLocalDays(mon, 3);
+const isoYear = thu.getFullYear();
+const jan4 = new Date(isoYear, 0, 4, 12, 0, 0);
+const jan4IsoDay = jan4.getDay() || 7;
+const week1Thu = addLocalDays(jan4, 4 - jan4IsoDay);
+const weekNum = 1 + Math.round((thu.getTime() - week1Thu.getTime()) / (7 * 86400000));
+const key = `${isoYear}-W${pad2(weekNum)}`;
+const range = `${pad2(mon.getMonth() + 1)}/${pad2(mon.getDate())}~${pad2(sun.getMonth() + 1)}/${pad2(sun.getDate())}`;
+return {
+key,
+range,
+startKey: formatDateKey(mon),
+};
+}
+function getHeatmapColor(totalTokens) {
+const t = Number(totalTokens) || 0;
+if (t <= 0)
+return '#2E2E38';
+if (t < 15e6)
+return '#58294E';
+if (t < 65e6)
+return '#843571';
+if (t < 180e6)
+return '#BA4A98';
+return '#F6A5D8';
+}
+const MODEL_CURATED_PALETTE = [
+'#C084FC', // Electric Purple
+'#38BDF8', // Sky Cyan
+'#FBBF24', // Amber Gold
+'#34D399', // Mint Emerald
+'#FB7185', // Coral Rose
+'#818CF8', // Indigo Violet
+'#FB923C', // Warm Orange
+'#2DD4BF', // Ice Teal
+];
+function stringHash(str) {
+let hash = 0;
+const s = String(str || '');
+for (let i = 0; i < s.length; i++) {
+hash = ((hash << 5) - hash) + s.charCodeAt(i);
+hash |= 0;
+}
+return hash;
+}
+function buildModelColorMap(stats) {
+const modelTotals = new Map();
+if (stats && stats.allTime && stats.allTime.models) {
+for (const [name, m] of Object.entries(stats.allTime.models)) {
+const tot = Number(m && m.total) || 0;
+if (tot > 0) {
+modelTotals.set(name, (modelTotals.get(name) || 0) + tot);
+}
+}
+}
+if (stats && stats.days) {
+for (const d of Object.values(stats.days)) {
+if (d && d.models) {
+for (const [name, m] of Object.entries(d.models)) {
+const tot = Number(m && m.total) || 0;
+if (tot > 0 && !modelTotals.has(name)) {
+modelTotals.set(name, (modelTotals.get(name) || 0) + tot);
+}
+}
+}
+}
+}
+const namedModels = [];
+for (const [name, tot] of modelTotals.entries()) {
+if (name !== '其他模型' && name !== '其他') {
+namedModels.push({ name, total: tot });
+}
+}
+namedModels.sort((a, b) => b.total - a.total);
+const colorMap = new Map();
+colorMap.set('其他模型', '#64748B');
+colorMap.set('其他', '#64748B');
+namedModels.forEach((item, idx) => {
+if (idx < MODEL_CURATED_PALETTE.length) {
+colorMap.set(item.name, MODEL_CURATED_PALETTE[idx]);
+} else {
+const hash = stringHash(item.name);
+// Golden-angle hue progression for high dynamic distinction
+const hue = ((idx * 137.508 + Math.abs(hash % 60)) % 360).toFixed(1);
+colorMap.set(item.name, `hsl(${hue}, 78%, 65%)`);
+}
+});
+return {
+getColor(modelName) {
+const key = String(modelName || '').trim();
+if (!key) return '#64748B';
+if (colorMap.has(key)) return colorMap.get(key);
+if (key === '其他模型' || key === '其他') return '#64748B';
+const hash = stringHash(key);
+const fallbackIdx = colorMap.size;
+const hue = ((fallbackIdx * 137.508 + Math.abs(hash % 60)) % 360).toFixed(1);
+const color = `hsl(${hue}, 78%, 65%)`;
+colorMap.set(key, color);
+return color;
+},
+colorMap,
+};
+}
+function mergeModelsMap(target, src) {
+if (!src || typeof src !== 'object' || !target) return target;
+for (const [mName, mData] of Object.entries(src)) {
+if (!mData) continue;
+if (!target[mName]) {
+target[mName] = { in: 0, cache: 0, out: 0, total: 0, steps: 0 };
+}
+target[mName].in += Number(mData.in) || 0;
+target[mName].cache += Number(mData.cache) || 0;
+target[mName].out += Number(mData.out) || 0;
+target[mName].total += Number(mData.total) || 0;
+target[mName].steps += Number(mData.steps) || 0;
+}
+return target;
+}
+function getSortedModelEntries(modelsObj) {
+return Object.entries(modelsObj || {})
+.filter(([, v]) => (Number(v && v.total) || 0) > 0)
+.sort((a, b) => (Number(b[1].total) || 0) - (Number(a[1].total) || 0));
+}
+function normalizeActivityStats(raw) {
+const emptyBucket = () => ({ in: 0, cache: 0, out: 0, total: 0, desktop: 0, cli: 0, steps: 0, activeDays: 0, models: {} });
+if (!raw || typeof raw !== 'object') {
+return {
+todayKey: getLocalTodayKey(),
+today: emptyBucket(),
+thisWeek: emptyBucket(),
+thisMonth: emptyBucket(),
+allTime: { ...emptyBucket(), totalConversations: 0 },
+days: {},
+_empty: true,
+};
+}
+return {
+todayKey: typeof raw.todayKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.todayKey) ? raw.todayKey : getLocalTodayKey(),
+today: { ...emptyBucket(), ...(raw.today || {}), models: (raw.today && raw.today.models && typeof raw.today.models === 'object') ? raw.today.models : {} },
+thisWeek: { ...emptyBucket(), ...(raw.thisWeek || {}), models: (raw.thisWeek && raw.thisWeek.models && typeof raw.thisWeek.models === 'object') ? raw.thisWeek.models : {} },
+thisMonth: { ...emptyBucket(), ...(raw.thisMonth || {}), models: (raw.thisMonth && raw.thisMonth.models && typeof raw.thisMonth.models === 'object') ? raw.thisMonth.models : {} },
+allTime: { ...emptyBucket(), totalConversations: 0, ...(raw.allTime || {}), models: (raw.allTime && raw.allTime.models && typeof raw.allTime.models === 'object') ? raw.allTime.models : {} },
+days: raw.days && typeof raw.days === 'object' ? raw.days : {},
+_empty: false,
+};
+}
+let activityModalOpen = false;
+let activityActiveTab = 'daily'; // 'daily' | 'weekly' | 'monthly' | 'total'
+let activityBreakdownMode = 'source'; // 'source' | 'model'
+let activityOverlayEl = null;
+let activityRefreshTimer = null;
+let activityEscapeHandler = null;
+let activityStatsCache = null;
+let activityFetchError = false;
+let activityFetchSeq = 0;
+let activityRenderedTodayKey = null;
+let activityHoveredDate = null;
+let activityHoveredCell = null;
+function getDayData(stats, dateStr) {
+const d = stats && stats.days ? stats.days[dateStr] : null;
+if (!d || typeof d !== 'object') {
+return { in: 0, cache: 0, out: 0, total: 0, desktop: 0, cli: 0, steps: 0, models: {} };
+}
+return {
+in: Number(d.in) || 0,
+cache: Number(d.cache) || 0,
+out: Number(d.out) || 0,
+total: Number(d.total) || 0,
+desktop: Number(d.desktop) || 0,
+cli: Number(d.cli) || 0,
+steps: Number(d.steps) || 0,
+models: (d.models && typeof d.models === 'object') ? d.models : {},
+};
+}
+function hideActivityTooltip() {
+if (!activityOverlayEl)
+return;
+const tt = activityOverlayEl.querySelector('[data-role="ta-tooltip"]');
+if (tt)
+tt.style.display = 'none';
+}
+function showActivityTooltip(cellEl, dateStr) {
+if (!activityOverlayEl || !cellEl || !dateStr)
+return;
+const tt = activityOverlayEl.querySelector('[data-role="ta-tooltip"]');
+if (!tt)
+return;
+const stats = activityStatsCache || normalizeActivityStats(null);
+const day = getDayData(stats, dateStr);
+const parts = dateStr.split('-');
+const dateLabel = `${Number(parts[1])}月${Number(parts[2])}日`;
+const totalLabel = `${formatActivityTokens(day.total)} Tokens`;
+const subLabel = `Desktop ${formatActivityTokens(day.desktop)} · CLI ${formatActivityTokens(day.cli)} · 缓存 ${calcCachePct(day)}%`;
+const elDate = tt.querySelector('[data-role="tt-date"]');
+const elTotal = tt.querySelector('[data-role="tt-total"]');
+const elSub = tt.querySelector('[data-role="tt-sub"]');
+if (elDate)
+elDate.textContent = dateLabel;
+if (elTotal)
+elTotal.textContent = totalLabel;
+if (elSub)
+elSub.textContent = subLabel;
+tt.style.visibility = 'hidden';
+tt.style.display = 'block';
+const rect = cellEl.getBoundingClientRect();
+const tw = tt.offsetWidth || 180;
