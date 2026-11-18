@@ -208,7 +208,7 @@ srcLegendEl.innerHTML = renderModelLegend(rows, palette);
 const days = stats.days || {};
 const weekdayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 if (activityActiveTab === 'daily') {
-titleEl.textContent = '每日消耗明细（最近 10 个活跃日）';
+titleEl.textContent = '每日消耗明细（近 10 个活跃日）';
 const rows = Object.keys(days)
 .map((dateStr) => ({ dateStr, ...getDayData(stats, dateStr) }))
 .filter((r) => r.total > 0)
