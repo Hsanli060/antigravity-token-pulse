@@ -57,8 +57,8 @@ controlsWidth += Math.max(Number(ch.offsetWidth) || 0, Number(ch.scrollWidth) ||
 }
 const wasWrapped = bar.classList.contains('is-wrapped');
 const wasCompact = bar.classList.contains('is-compact');
-const wrapThreshold = controlsWidth + 235 + (wasWrapped ? 18 : 0);
-const compactThreshold = controlsWidth + 300 + (wasCompact ? 14 : 0);
+const wrapThreshold = controlsWidth + 255 + (wasWrapped ? 18 : 0);
+const compactThreshold = controlsWidth + 315 + (wasCompact ? 14 : 0);
 const shouldWrap = footerWidth < 450 || leftWidth < wrapThreshold;
 const shouldCompact = shouldWrap || footerWidth < 590 || leftWidth < compactThreshold;
 bar.classList.toggle('is-compact', shouldCompact);

@@ -46,7 +46,7 @@ gridHtml += '</div>';
 gridEl.innerHTML = gridHtml;
 monthsEl.innerHTML = monthMarks
 .map((m) => {
-const leftPx = Math.min(m.col * 14, 739 - 28);
+const leftPx = Math.min(m.col * 15, 792 - 28);
 return `<span class="agy-ta-month-lbl" style="left:${leftPx}px;">${escHtml(m.label)}</span>`;
 })
 .join('');
@@ -97,26 +97,71 @@ ${segsHtml}
 function buildModelSubHtml(modelsObj, palette) {
 const entries = getSortedModelEntries(modelsObj);
 if (entries.length === 0) {
-return '暂无模型明细';
+return '<span class="agy-ta-ellipsis">暂无模型明细</span>';
 }
-const topItems = entries.slice(0, 3).map(([name, m]) => ({
-name,
-total: Number(m && m.total) || 0,
-color: palette ? palette.getColor(name) : '#64748B',
-}));
-if (entries.length > 3) {
-const otherTotal = entries.slice(3).reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0);
+const totalAll = entries.reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0);
+const named = [];
+const foldedBase = [];
+for (const entry of entries) {
+const [name] = entry;
+if (name === '其他模型' || name === '其他') {
+foldedBase.push(entry);
+}
+else {
+named.push(entry);
+}
+}
+const topItems = [];
+if (named.length === 0) {
+const otherTotal = foldedBase.reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0);
 if (otherTotal > 0) {
+const otherLines = foldedBase.map(([n, m]) => {
+const tot = Number(m && m.total) || 0;
+const pct = totalAll > 0 ? ((tot / totalAll) * 100).toFixed(1) : '0.0';
+return `• ${n}: ${formatActivityTokens(tot)} (${pct}%)`;
+});
 topItems.push({
 name: '其他',
 total: otherTotal,
 color: palette ? palette.getColor('其他') : '#64748B',
+isOther: true,
+title: `其他模型合计 ${formatActivityTokens(otherTotal)}：\n${otherLines.join('\n')}`,
+});
+}
+}
+else {
+const showCount = (named.length <= 3 && foldedBase.length === 0) ? named.length : Math.min(2, named.length);
+for (const [name, m] of named.slice(0, showCount)) {
+const tot = Number(m && m.total) || 0;
+const pct = totalAll > 0 ? ((tot / totalAll) * 100).toFixed(1) : '0.0';
+topItems.push({
+name,
+total: tot,
+color: palette ? palette.getColor(name) : '#64748B',
+isOther: false,
+title: `${name}: ${formatActivityTokens(tot)} (${pct}%)`,
+});
+}
+const folded = [...named.slice(showCount), ...foldedBase];
+const otherTotal = folded.reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0);
+if (otherTotal > 0) {
+const otherLines = folded.map(([n, m]) => {
+const tot = Number(m && m.total) || 0;
+const pct = totalAll > 0 ? ((tot / totalAll) * 100).toFixed(1) : '0.0';
+return `• ${n}: ${formatActivityTokens(tot)} (${pct}%)`;
+});
+topItems.push({
+name: '其他',
+total: otherTotal,
+color: palette ? palette.getColor('其他') : '#64748B',
+isOther: true,
+title: `其他模型合计 ${formatActivityTokens(otherTotal)}：\n${otherLines.join('\n')}`,
 });
 }
 }
 return topItems.map(item =>
-`<span style="display:inline-flex;align-items:center;gap:4px;"><span class="agy-ta-model-inline-dot" style="background:${item.color};"></span>${escHtml(item.name)} ${formatActivityTokens(item.total)}</span>`
-).join(' · ');
+`<span class="agy-ta-model-chip${item.isOther ? ' is-other' : ''}" title="${escHtml(item.title)}"><span class="agy-ta-model-inline-dot" style="background:${item.color};"></span><span class="agy-ta-ellipsis">${escHtml(item.name)}</span><span class="agy-ta-model-chip-val">${formatActivityTokens(item.total)}</span></span>`
+).join('<span class="agy-ta-model-sep">·</span>');
 }
 function buildModelTooltipAttr(periodLabel, modelsObj) {
 const entries = getSortedModelEntries(modelsObj);
@@ -146,27 +191,45 @@ mergeModelsMap(merged, r.models);
 const allEntries = getSortedModelEntries(merged);
 if (allEntries.length === 0)
 return '';
+const totalAll = allEntries.reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0);
 const named = allEntries.filter(([name]) => name !== '其他模型' && name !== '其他');
 const top4 = named.slice(0, 4);
 const top4Names = new Set(top4.map(([n]) => n));
 let otherSum = 0;
+const otherEntries = [];
 for (const [name, m] of allEntries) {
 if (!top4Names.has(name)) {
-otherSum += (Number(m && m.total) || 0);
+const tot = Number(m && m.total) || 0;
+otherSum += tot;
+if (tot > 0) {
+otherEntries.push([name, tot]);
 }
 }
-const items = top4.map(([name]) => ({
+}
+const items = top4.map(([name, m]) => {
+const tot = Number(m && m.total) || 0;
+const pct = totalAll > 0 ? ((tot / totalAll) * 100).toFixed(1) : '0.0';
+return {
 name,
 color: palette.getColor(name),
-}));
+isOther: false,
+title: `${name}: ${formatActivityTokens(tot)} (${pct}%)`,
+};
+});
 if (otherSum > 0) {
+const otherLines = otherEntries.map(([n, tot]) => {
+const pct = totalAll > 0 ? ((tot / totalAll) * 100).toFixed(1) : '0.0';
+return `• ${n}: ${formatActivityTokens(tot)} (${pct}%)`;
+});
 items.push({
 name: '其他',
 color: palette.getColor('其他'),
+isOther: true,
+title: `其他模型合计 ${formatActivityTokens(otherSum)}：\n${otherLines.join('\n')}`,
 });
 }
 return items.map(it =>
-`<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:${it.color};"></span>${escHtml(it.name)}</span>`
+`<span class="agy-ta-src-item${it.isOther ? ' is-other' : ''}" title="${escHtml(it.title)}"><span class="agy-ta-src-dot" style="background:${it.color};"></span><span class="agy-ta-ellipsis">${escHtml(it.name)}</span></span>`
 ).join('');
 }
 function renderBreakdownSection(stats) {
@@ -197,8 +260,8 @@ if (!srcLegendEl)
 return;
 if (activityBreakdownMode === 'source') {
 srcLegendEl.innerHTML = `
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop</span>
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI</span>
+<span class="agy-ta-src-item" title="Desktop"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span><span class="agy-ta-ellipsis">Desktop</span></span>
+<span class="agy-ta-src-item" title="CLI"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span><span class="agy-ta-ellipsis">CLI</span></span>
 `;
 }
 else {
@@ -209,6 +272,7 @@ const days = stats.days || {};
 const weekdayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 if (activityActiveTab === 'daily') {
 titleEl.textContent = '每日消耗明细（近 10 个活跃日）';
+titleEl.title = titleEl.textContent;
 const rows = Object.keys(days)
 .map((dateStr) => ({ dateStr, ...getDayData(stats, dateStr) }))
 .filter((r) => r.total > 0)
@@ -231,18 +295,20 @@ const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
 const barHtml = activityBreakdownMode === 'model'
 ? buildModelProgressHtml(r.models, r.total, maxTotal, palette)
 : buildDualProgressHtml(r.desktop, r.cli, r.total, maxTotal);
+const leftSubText = `输入 ${formatActivityTokens(r.in)} · 缓存 ${formatActivityTokens(r.cache)} (${calcCachePct(r)}%) · 输出 ${formatActivityTokens(r.out)}`;
+const srcSubText = `Desktop ${formatActivityTokens(r.desktop)} · CLI ${formatActivityTokens(r.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
-? `<span>${buildModelSubHtml(r.models, palette)}</span>`
-: `<span>Desktop ${formatActivityTokens(r.desktop)} · CLI ${formatActivityTokens(r.cli)}</span>`;
+? `<span class="agy-ta-row-sub-right">${buildModelSubHtml(r.models, palette)}</span>`
+: `<span class="agy-ta-row-sub-right" title="${escHtml(srcSubText)}"><span class="agy-ta-ellipsis">${escHtml(srcSubText)}</span></span>`;
 return `
 <div class="agy-ta-row"${titleAttr}>
 <div class="agy-ta-row-top">
-<span class="agy-ta-row-name">${escHtml(r.dateStr)} · ${wd}${isToday ? '<span class="agy-ta-tag">今天</span>' : ''}</span>
+<span class="agy-ta-row-name"><span class="agy-ta-ellipsis">${escHtml(r.dateStr)} · ${wd}</span>${isToday ? '<span class="agy-ta-tag">今天</span>' : ''}</span>
 <span class="agy-ta-row-total">${formatActivityTokens(r.total)}</span>
 </div>
 ${barHtml}
 <div class="agy-ta-row-sub">
-<span>输入 ${formatActivityTokens(r.in)} · 缓存 ${formatActivityTokens(r.cache)} (${calcCachePct(r)}%) · 输出 ${formatActivityTokens(r.out)}</span>
+<span class="agy-ta-row-sub-left" title="${escHtml(leftSubText)}">${escHtml(leftSubText)}</span>
 ${rightSubHtml}
 </div>
 </div>
@@ -251,7 +317,8 @@ ${rightSubHtml}
 .join('');
 }
 else if (activityActiveTab === 'weekly') {
-titleEl.textContent = '每周消耗对比（最近 8 个 ISO 周）';
+titleEl.textContent = '每周消耗对比（近 8 个 ISO 周）';
+titleEl.title = titleEl.textContent;
 const weekMap = new Map();
 for (const dateStr of Object.keys(days)) {
 const d = getDayData(stats, dateStr);
@@ -291,18 +358,20 @@ const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
 const barHtml = activityBreakdownMode === 'model'
 ? buildModelProgressHtml(w.models, w.total, maxTotal, palette)
 : buildDualProgressHtml(w.desktop, w.cli, w.total, maxTotal);
+const leftSubText = `活跃 ${w.activeDays} 天 · 缓存率 ${calcCachePct(w)}% · 输出 ${formatActivityTokens(w.out)}`;
+const srcSubText = `Desktop ${formatActivityTokens(w.desktop)} · CLI ${formatActivityTokens(w.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
-? `<span>${buildModelSubHtml(w.models, palette)}</span>`
-: `<span>Desktop ${formatActivityTokens(w.desktop)} · CLI ${formatActivityTokens(w.cli)}</span>`;
+? `<span class="agy-ta-row-sub-right">${buildModelSubHtml(w.models, palette)}</span>`
+: `<span class="agy-ta-row-sub-right" title="${escHtml(srcSubText)}"><span class="agy-ta-ellipsis">${escHtml(srcSubText)}</span></span>`;
 return `
 <div class="agy-ta-row"${titleAttr}>
 <div class="agy-ta-row-top">
-<span class="agy-ta-row-name">${escHtml(w.key)} (${escHtml(w.range)})${isCur ? '<span class="agy-ta-tag">本周</span>' : ''}</span>
+<span class="agy-ta-row-name"><span class="agy-ta-ellipsis">${escHtml(w.key)} (${escHtml(w.range)})</span>${isCur ? '<span class="agy-ta-tag">本周</span>' : ''}</span>
 <span class="agy-ta-row-total">${formatActivityTokens(w.total)}</span>
 </div>
 ${barHtml}
 <div class="agy-ta-row-sub">
-<span>活跃 ${w.activeDays} 天 · 缓存率 ${calcCachePct(w)}% · 输出 ${formatActivityTokens(w.out)}</span>
+<span class="agy-ta-row-sub-left" title="${escHtml(leftSubText)}">${escHtml(leftSubText)}</span>
 ${rightSubHtml}
 </div>
 </div>
@@ -312,6 +381,7 @@ ${rightSubHtml}
 }
 else if (activityActiveTab === 'monthly') {
 titleEl.textContent = '每月消耗对比';
+titleEl.title = titleEl.textContent;
 const monthMap = new Map();
 for (const dateStr of Object.keys(days)) {
 const d = getDayData(stats, dateStr);
@@ -353,18 +423,20 @@ const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
 const barHtml = activityBreakdownMode === 'model'
 ? buildModelProgressHtml(m.models, m.total, maxTotal, palette)
 : buildDualProgressHtml(m.desktop, m.cli, m.total, maxTotal);
+const leftSubText = `输入 ${formatActivityTokens(m.in)} · 缓存 ${formatActivityTokens(m.cache)} (${calcCachePct(m)}%) · 输出 ${formatActivityTokens(m.out)} · 活跃 ${m.activeDays} 天`;
+const srcSubText = `Desktop ${formatActivityTokens(m.desktop)} · CLI ${formatActivityTokens(m.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
-? `<span>${buildModelSubHtml(m.models, palette)}</span>`
-: `<span>Desktop ${formatActivityTokens(m.desktop)} · CLI ${formatActivityTokens(m.cli)}</span>`;
+? `<span class="agy-ta-row-sub-right">${buildModelSubHtml(m.models, palette)}</span>`
+: `<span class="agy-ta-row-sub-right" title="${escHtml(srcSubText)}"><span class="agy-ta-ellipsis">${escHtml(srcSubText)}</span></span>`;
 return `
 <div class="agy-ta-row"${titleAttr}>
 <div class="agy-ta-row-top">
-<span class="agy-ta-row-name">${escHtml(label)}${isCur ? '<span class="agy-ta-tag">本月</span>' : ''}</span>
+<span class="agy-ta-row-name"><span class="agy-ta-ellipsis">${escHtml(label)}</span>${isCur ? '<span class="agy-ta-tag">本月</span>' : ''}</span>
 <span class="agy-ta-row-total">${formatActivityTokens(m.total)}</span>
 </div>
 ${barHtml}
 <div class="agy-ta-row-sub">
-<span>输入 ${formatActivityTokens(m.in)} · 缓存 ${formatActivityTokens(m.cache)} (${calcCachePct(m)}%) · 输出 ${formatActivityTokens(m.out)} · 活跃 ${m.activeDays} 天</span>
+<span class="agy-ta-row-sub-left" title="${escHtml(leftSubText)}">${escHtml(leftSubText)}</span>
 ${rightSubHtml}
 </div>
 </div>
@@ -374,6 +446,7 @@ ${rightSubHtml}
 }
 else {
 titleEl.textContent = '累计总量概览与构成分布';
+titleEl.title = titleEl.textContent;
 const all = stats.allTime || {};
 const allIn = Number(all.in) || 0;
 const allCache = Number(all.cache) || 0;
@@ -399,15 +472,16 @@ let modelPanelHtml = '';
 if (modelEntries.length === 0) {
 modelPanelHtml = `
 <div class="agy-ta-panel" style="margin-top:10px;">
-<div class="agy-ta-panel-title">各模型累计消耗分布</div>
+<div class="agy-ta-panel-title" title="各模型累计消耗分布">各模型累计消耗分布</div>
 <div style="color:var(--agy-ta-muted, #7E7E8E);font-size:11.5px;padding:8px 0;text-align:center;">暂无模型消耗明细记录</div>
 </div>
 `;
 }
 else {
+const modelPanelTitle = `各模型累计消耗分布（共 ${modelEntries.length} 个模型）`;
 modelPanelHtml = `
 <div class="agy-ta-panel" style="margin-top:10px;">
-<div class="agy-ta-panel-title">各模型累计消耗分布（共 ${modelEntries.length} 个模型）</div>
+<div class="agy-ta-panel-title" title="${escHtml(modelPanelTitle)}">${escHtml(modelPanelTitle)}</div>
 <div class="agy-ta-bar-track" style="height:10px;">
 <div class="agy-ta-bar-fill" style="width:100%;">
 ${modelEntries.map(([name, m]) => {
@@ -427,17 +501,18 @@ const mOut = Number(m && m.out) || 0;
 const pct = totalModelSum > 0 ? (mTot / totalModelSum) * 100 : 0;
 const col = palette.getColor(name);
 const stepsPart = m.steps ? ` · ${m.steps} 步` : '';
+const metaText = `输入 ${formatActivityTokens(mIn)} · 缓存 ${formatActivityTokens(mCache)} · 输出 ${formatActivityTokens(mOut)}${stepsPart}`;
 return `
 <div class="agy-ta-model-item">
 <div class="agy-ta-model-row-head">
-<span class="agy-ta-model-name"><span class="agy-ta-model-inline-dot" style="background:${col};"></span>${escHtml(name)}</span>
+<span class="agy-ta-model-name" title="${escHtml(name)}"><span class="agy-ta-model-inline-dot" style="background:${col};"></span><span class="agy-ta-ellipsis">${escHtml(name)}</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(mTot)} (${pct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
 <div class="agy-ta-comp-fill" style="width:${pct.toFixed(2)}%; background:${col};"></div>
 </div>
-<div class="agy-ta-model-meta">
-输入 ${formatActivityTokens(mIn)} · 缓存 ${formatActivityTokens(mCache)} · 输出 ${formatActivityTokens(mOut)}${stepsPart}
+<div class="agy-ta-model-meta" title="${escHtml(metaText)}">
+${escHtml(metaText)}
 </div>
 </div>
 `;
@@ -447,13 +522,15 @@ return `
 `;
 }
 
+const tokPanelTitle = `Token 类型构成（共 ${formatActivityTokens(all.total)}）`;
+const srcPanelTitle = `端侧来源分布 · ${Number(all.activeDays) || 0} 活跃天`;
 listEl.innerHTML = `
 <div class="agy-ta-total-grid">
 <div class="agy-ta-panel">
-<div class="agy-ta-panel-title">Token 类型构成（共 ${formatActivityTokens(all.total)}）</div>
+<div class="agy-ta-panel-title" title="${escHtml(tokPanelTitle)}">${escHtml(tokPanelTitle)}</div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span>输入 (Input)</span>
+<span class="agy-ta-comp-label" title="输入 (Input)"><span class="agy-ta-ellipsis">输入 (Input)</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allIn)} (${inPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
@@ -462,7 +539,7 @@ listEl.innerHTML = `
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span>缓存读取 (Cache Read)</span>
+<span class="agy-ta-comp-label" title="缓存读取 (Cache Read)"><span class="agy-ta-ellipsis">缓存读取 (Cache Read)</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allCache)} (${cacheCompPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
@@ -471,7 +548,7 @@ listEl.innerHTML = `
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span>输出 (Output)</span>
+<span class="agy-ta-comp-label" title="输出 (Output)"><span class="agy-ta-ellipsis">输出 (Output)</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allOut)} (${outPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
@@ -480,7 +557,7 @@ listEl.innerHTML = `
 </div>
 </div>
 <div class="agy-ta-panel">
-<div class="agy-ta-panel-title">端侧来源分布 · ${Number(all.activeDays) || 0} 活跃天</div>
+<div class="agy-ta-panel-title" title="${escHtml(srcPanelTitle)}">${escHtml(srcPanelTitle)}</div>
 <div class="agy-ta-bar-track" style="height:10px;">
 <div class="agy-ta-bar-fill" style="width:${srcSum > 0 ? 100 : 0}%;">
 <div class="agy-ta-seg-desktop" style="width:${desktopPct.toFixed(2)}%;"></div>
@@ -489,19 +566,19 @@ listEl.innerHTML = `
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop (Antigravity 2.0)</span>
+<span class="agy-ta-comp-label" title="Desktop (Antigravity 2.0)"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span><span class="agy-ta-ellipsis">Desktop (Antigravity 2.0)</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allDesktop)} (${desktopPct.toFixed(1)}%)</span>
 </div>
 </div>
 <div class="agy-ta-comp-item">
 <div class="agy-ta-comp-head">
-<span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI (agy)</span>
+<span class="agy-ta-comp-label" title="CLI (agy)"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span><span class="agy-ta-ellipsis">CLI (agy)</span></span>
 <span class="agy-ta-comp-val">${formatActivityTokens(allCli)} (${cliPct.toFixed(1)}%)</span>
 </div>
 </div>
-<div class="agy-ta-row-sub" style="margin-top:auto;padding-top:4px;border-top:1px solid var(--agy-ta-divider, rgba(255,255,255,0.06));">
-<span>累计：${escHtml(convText)}</span>
-<span>平均缓存率 ${calcCachePct(all)}%</span>
+<div class="agy-ta-panel-foot">
+<span class="agy-ta-ellipsis" title="累计：${escHtml(convText)}">累计：${escHtml(convText)}</span>
+<span class="agy-ta-panel-foot-right">平均缓存率 ${calcCachePct(all)}%</span>
 </div>
 </div>
 </div>
@@ -521,19 +598,29 @@ const today = stats.today;
 const thisWeek = stats.thisWeek;
 const thisMonth = stats.thisMonth;
 const allTime = stats.allTime;
-const setRoleText = (role, txt) => {
+const setRoleText = (role, txt, titleText) => {
 const el = activityOverlayEl.querySelector(`[data-role="${role}"]`);
-if (el)
+if (el) {
 el.textContent = txt;
+if (typeof titleText === 'string') {
+el.title = titleText;
+}
+}
 };
+const todaySub = `Desktop ${formatActivityTokens(today.desktop)} · CLI ${formatActivityTokens(today.cli)}`;
+const weekSub = `缓存率 ${calcCachePct(thisWeek)}% · 输出 ${formatActivityTokens(thisWeek.out)}`;
+const monthDays = `活跃 ${Number(thisMonth.activeDays) || 0} 天`;
+const monthSub = `Desktop ${formatActivityTokens(thisMonth.desktop)} · CLI ${formatActivityTokens(thisMonth.cli)}`;
+const allSub = `共 ${Number(allTime.activeDays) || 0} 活跃天 · 缓存率 ${calcCachePct(allTime)}%`;
 setRoleText('kpi-today-val', formatActivityTokens(today.total));
-setRoleText('kpi-today-sub', `Desktop ${formatActivityTokens(today.desktop)} · CLI ${formatActivityTokens(today.cli)}`);
+setRoleText('kpi-today-sub', todaySub, todaySub);
 setRoleText('kpi-week-val', formatActivityTokens(thisWeek.total));
-setRoleText('kpi-week-sub', `缓存率 ${calcCachePct(thisWeek)}% · 输出 ${formatActivityTokens(thisWeek.out)}`);
+setRoleText('kpi-week-sub', weekSub, weekSub);
+setRoleText('kpi-month-days', monthDays, monthDays);
 setRoleText('kpi-month-val', formatActivityTokens(thisMonth.total));
-setRoleText('kpi-month-sub', `活跃 ${Number(thisMonth.activeDays) || 0} 天 · Desktop ${formatActivityTokens(thisMonth.desktop)} / CLI ${formatActivityTokens(thisMonth.cli)}`);
+setRoleText('kpi-month-sub', monthSub, `${monthDays} · ${monthSub}`);
 setRoleText('kpi-all-val', formatActivityTokens(allTime.total));
-setRoleText('kpi-all-sub', `共 ${Number(allTime.activeDays) || 0} 活跃天 · 缓存率 ${calcCachePct(allTime)}%`);
+setRoleText('kpi-all-sub', allSub, allSub);
 const light = isLightTheme();
 activityOverlayEl.classList.toggle(LIGHT_MODAL_CLASS, light);
 activityOverlayEl.setAttribute('data-agy-theme', light ? 'light' : 'dark');
@@ -653,7 +740,7 @@ overlay.innerHTML = `
 <div class="agy-ta-header">
 <div class="agy-ta-title-wrap">
 <span class="agy-ta-title">Token 活动</span>
-<span class="agy-ta-badge"><span class="agy-ta-badge-dot"></span>Desktop + CLI 同步</span>
+<span class="agy-ta-badge" title="Desktop + CLI 同步"><span class="agy-ta-badge-dot"></span><span class="agy-ta-ellipsis">Desktop + CLI 同步</span></span>
 </div>
 <div class="agy-ta-controls">
 <div class="agy-ta-tabs">
@@ -667,29 +754,29 @@ overlay.innerHTML = `
 </div>
 <div class="agy-ta-kpis">
 <div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label">今日消耗</div>
+<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">今日消耗</span></div>
 <div class="agy-ta-kpi-val" data-role="kpi-today-val">--</div>
 <div class="agy-ta-kpi-sub" data-role="kpi-today-sub">Desktop 0 · CLI 0</div>
 </div>
 <div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label">本周消耗</div>
+<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">本周消耗</span></div>
 <div class="agy-ta-kpi-val" data-role="kpi-week-val">--</div>
 <div class="agy-ta-kpi-sub" data-role="kpi-week-sub">缓存率 0% · 输出 0</div>
 </div>
 <div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label">本月消耗</div>
+<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">本月消耗</span><span class="agy-ta-kpi-label-meta" data-role="kpi-month-days">活跃 0 天</span></div>
 <div class="agy-ta-kpi-val" data-role="kpi-month-val">--</div>
-<div class="agy-ta-kpi-sub" data-role="kpi-month-sub">活跃 0 天 · Desktop 0 / CLI 0</div>
+<div class="agy-ta-kpi-sub" data-role="kpi-month-sub">Desktop 0 · CLI 0</div>
 </div>
 <div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label">累计总量</div>
+<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">累计总量</span></div>
 <div class="agy-ta-kpi-val" data-role="kpi-all-val">--</div>
 <div class="agy-ta-kpi-sub" data-role="kpi-all-sub">共 0 活跃天 · 缓存率 0%</div>
 </div>
 </div>
 <div class="agy-ta-heatmap-section">
 <div class="agy-ta-section-head">
-<span class="agy-ta-section-title">近 53 周活动热力图</span>
+<span class="agy-ta-section-title" title="近 53 周活动热力图">近 53 周活动热力图</span>
 <span class="agy-ta-legend">
 <span>少</span>
 <span class="agy-ta-legend-sq is-lv0"></span>
@@ -712,8 +799,8 @@ overlay.innerHTML = `
 <span class="agy-ta-section-title" data-role="ta-bd-title">每日消耗明细</span>
 <div class="agy-ta-bd-controls" data-role="ta-bd-controls">
 <span class="agy-ta-src-legend" data-role="ta-src-legend">
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span>Desktop</span>
-<span class="agy-ta-src-item"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span>CLI</span>
+<span class="agy-ta-src-item" title="Desktop"><span class="agy-ta-src-dot" style="background:var(--agy-ta-desktop-color, #D965B5);"></span><span class="agy-ta-ellipsis">Desktop</span></span>
+<span class="agy-ta-src-item" title="CLI"><span class="agy-ta-src-dot" style="background:var(--agy-ta-cli-color, #60A5FA);"></span><span class="agy-ta-ellipsis">CLI</span></span>
 </span>
 <div class="agy-ta-mode-switch" data-role="ta-mode-switch">
 <button type="button" class="agy-ta-mode-btn" data-mode="source">端侧</button>
