@@ -397,6 +397,21 @@ box-sizing: border-box;
 --agy-ta-cli-color: #60A5FA;
 --agy-ta-tok-in: #A78BFA;
 --agy-ta-tok-out: #34D399;
+--agy-ta-q-good: #34D399;
+--agy-ta-q-warn: #FBBF24;
+--agy-ta-q-low: #FB7185;
+--agy-ta-btn-bg: rgba(255, 255, 255, 0.05);
+--agy-ta-btn-border: rgba(255, 255, 255, 0.12);
+--agy-ta-btn-fg: #D4D4E2;
+--agy-ta-btn-hover-bg: rgba(255, 255, 255, 0.1);
+--agy-ta-btn-hover-fg: #FFFFFF;
+--agy-ta-danger-bg: rgba(251, 113, 133, 0.18);
+--agy-ta-danger-border: rgba(251, 113, 133, 0.36);
+--agy-ta-danger-fg: #FDA4AF;
+--agy-ta-danger-hover-bg: rgba(251, 113, 133, 0.28);
+--agy-ta-warn-bg: rgba(251, 191, 36, 0.14);
+--agy-ta-warn-border: rgba(251, 191, 36, 0.28);
+--agy-ta-warn-fg: #FCD34D;
 position: fixed;
 inset: 0;
 z-index: 2147483640;
@@ -481,6 +496,21 @@ user-select: none;
 --agy-ta-cli-color: #2563EB;
 --agy-ta-tok-in: #7C3AED;
 --agy-ta-tok-out: #16A34A;
+--agy-ta-q-good: #16A34A;
+--agy-ta-q-warn: #D97706;
+--agy-ta-q-low: #DC2626;
+--agy-ta-btn-bg: #F3F4F6;
+--agy-ta-btn-border: #D1D5DB;
+--agy-ta-btn-fg: #374151;
+--agy-ta-btn-hover-bg: #E5E7EB;
+--agy-ta-btn-hover-fg: #111827;
+--agy-ta-danger-bg: rgba(220, 38, 38, 0.1);
+--agy-ta-danger-border: rgba(220, 38, 38, 0.28);
+--agy-ta-danger-fg: #DC2626;
+--agy-ta-danger-hover-bg: rgba(220, 38, 38, 0.18);
+--agy-ta-warn-bg: rgba(217, 119, 6, 0.1);
+--agy-ta-warn-border: rgba(217, 119, 6, 0.26);
+--agy-ta-warn-fg: #B45309;
 }
 #${MODAL_ID} .agy-ta-card {
 width: 860px;
@@ -905,12 +935,14 @@ gap: 8px;
 padding-right: 4px;
 }
 #${MODAL_ID} .agy-ta-breakdown-list::-webkit-scrollbar,
+#${MODAL_ID} .agy-ta-acct-list::-webkit-scrollbar,
 #${MODAL_ID} .agy-ta-card::-webkit-scrollbar,
 #${MODAL_ID} .agy-ta-heatmap-scroll::-webkit-scrollbar {
 width: 5px;
 height: 5px;
 }
 #${MODAL_ID} .agy-ta-breakdown-list::-webkit-scrollbar-thumb,
+#${MODAL_ID} .agy-ta-acct-list::-webkit-scrollbar-thumb,
 #${MODAL_ID} .agy-ta-card::-webkit-scrollbar-thumb,
 #${MODAL_ID} .agy-ta-heatmap-scroll::-webkit-scrollbar-thumb {
 background: var(--agy-ta-scrollbar);
@@ -1122,6 +1154,201 @@ padding: 28px 12px;
 color: var(--agy-ta-muted);
 font-size: 12px;
 }
+#${MODAL_ID} .agy-ta-acct-pill {
+display: inline-flex;
+align-items: center;
+gap: 5px;
+max-width: 190px;
+padding: 2px 8px;
+border-radius: 999px;
+border: 1px solid var(--agy-ta-tabs-border);
+background: var(--agy-ta-tabs-bg);
+color: var(--agy-ta-tab-fg);
+font-family: inherit;
+font-size: 11px;
+font-weight: 500;
+cursor: pointer;
+outline: none;
+transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+min-width: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-acct-pill:hover {
+background: var(--agy-ta-tab-hover-bg);
+color: var(--agy-ta-tab-hover-fg);
+border-color: var(--agy-ta-tab-active-border);
+}
+#${MODAL_ID} .agy-ta-acct-pill[hidden],
+#${MODAL_ID} .agy-ta-tab[hidden],
+#${MODAL_ID} .agy-ta-accounts-section[hidden] {
+display: none !important;
+}
+#${MODAL_ID} .agy-ta-accounts-section {
+margin-top: 16px;
+padding-top: 14px;
+border-top: 1px solid var(--agy-ta-divider);
+display: flex;
+flex-direction: column;
+gap: 10px;
+min-height: 260px;
+}
+#${MODAL_ID} .agy-ta-acct-head-left {
+display: flex;
+align-items: center;
+gap: 8px;
+min-width: 0;
+}
+#${MODAL_ID} .agy-ta-acct-meta {
+font-size: 11px;
+color: var(--agy-ta-muted);
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+}
+#${MODAL_ID} .agy-ta-acct-head-actions {
+display: inline-flex;
+align-items: center;
+gap: 8px;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-acct-btn {
+border: 1px solid var(--agy-ta-btn-border);
+background: var(--agy-ta-btn-bg);
+color: var(--agy-ta-btn-fg);
+font-family: inherit;
+font-size: 11.5px;
+font-weight: 500;
+padding: 4px 10px;
+border-radius: 7px;
+cursor: pointer;
+transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+outline: none;
+white-space: nowrap;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-acct-btn:hover:not(:disabled) {
+background: var(--agy-ta-btn-hover-bg);
+color: var(--agy-ta-btn-hover-fg);
+}
+#${MODAL_ID} .agy-ta-acct-btn:disabled {
+opacity: 0.55;
+cursor: not-allowed;
+}
+#${MODAL_ID} .agy-ta-acct-btn-danger {
+background: var(--agy-ta-danger-bg);
+border-color: var(--agy-ta-danger-border);
+color: var(--agy-ta-danger-fg);
+}
+#${MODAL_ID} .agy-ta-acct-btn-danger:hover:not(:disabled) {
+background: var(--agy-ta-danger-hover-bg);
+color: var(--agy-ta-danger-fg);
+}
+#${MODAL_ID} .agy-ta-acct-notice {
+font-size: 11.5px;
+padding: 7px 10px;
+border-radius: 8px;
+border: 1px solid var(--agy-ta-tabs-border);
+background: var(--agy-ta-tabs-bg);
+color: var(--agy-ta-row-sub-fg);
+line-height: 1.45;
+}
+#${MODAL_ID} .agy-ta-acct-notice.is-error {
+background: var(--agy-ta-danger-bg);
+border-color: var(--agy-ta-danger-border);
+color: var(--agy-ta-danger-fg);
+}
+#${MODAL_ID} .agy-ta-acct-notice.is-warn {
+background: var(--agy-ta-warn-bg);
+border-color: var(--agy-ta-warn-border);
+color: var(--agy-ta-warn-fg);
+}
+#${MODAL_ID} .agy-ta-acct-list {
+max-height: 440px;
+overflow-y: auto;
+display: flex;
+flex-direction: column;
+gap: 8px;
+padding-right: 4px;
+}
+#${MODAL_ID} .agy-ta-acct-row {
+gap: 8px;
+padding: 10px 12px;
+}
+#${MODAL_ID} .agy-ta-acct-row.is-active {
+border-color: var(--agy-ta-tab-active-border);
+background: var(--agy-ta-panel-bg);
+}
+#${MODAL_ID} .agy-ta-acct-row.is-disabled {
+opacity: 0.65;
+}
+#${MODAL_ID} .agy-ta-acct-top {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 10px;
+min-width: 0;
+}
+#${MODAL_ID} .agy-ta-acct-identity {
+display: flex;
+align-items: center;
+gap: 6px;
+min-width: 0;
+flex: 1 1 auto;
+}
+#${MODAL_ID} .agy-ta-acct-email {
+font-size: 12.5px;
+font-weight: 600;
+color: var(--agy-ta-row-name-fg);
+min-width: 0;
+}
+#${MODAL_ID} .agy-ta-acct-label {
+font-size: 10.5px;
+padding: 1px 6px;
+border-radius: 5px;
+background: var(--agy-ta-tabs-bg);
+border: 1px solid var(--agy-ta-tabs-border);
+color: var(--agy-ta-row-sub-fg);
+max-width: 120px;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-acct-tag-warn {
+background: var(--agy-ta-warn-bg);
+color: var(--agy-ta-warn-fg);
+}
+#${MODAL_ID} .agy-ta-acct-tag-danger {
+background: var(--agy-ta-danger-bg);
+color: var(--agy-ta-danger-fg);
+}
+#${MODAL_ID} .agy-ta-acct-actions {
+display: inline-flex;
+align-items: center;
+gap: 6px;
+flex-shrink: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-acct-confirm-hint {
+font-size: 11px;
+color: var(--agy-ta-warn-fg);
+}
+#${MODAL_ID} .agy-ta-acct-state-lbl {
+font-size: 11px;
+color: var(--agy-ta-muted);
+padding: 2px 4px;
+}
+#${MODAL_ID} .agy-ta-acct-quotas {
+display: grid;
+grid-template-columns: repeat(2, minmax(0, 1fr));
+gap: 12px;
+}
+#${MODAL_ID} .agy-ta-acct-secondary {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 8px;
+font-size: 10.5px;
+color: var(--agy-ta-muted);
+padding-top: 2px;
+}
 #${MODAL_ID} .agy-ta-tooltip {
 position: fixed;
 z-index: 2147483645;
@@ -1162,7 +1389,8 @@ text-overflow: ellipsis;
 #${MODAL_ID} .agy-ta-kpis {
 grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-#${MODAL_ID} .agy-ta-total-grid {
+#${MODAL_ID} .agy-ta-total-grid,
+#${MODAL_ID} .agy-ta-acct-quotas {
 grid-template-columns: 1fr;
 }
 #${MODAL_ID} .agy-ta-section-title {
@@ -1178,7 +1406,8 @@ text-overflow: ellipsis;
 }
 }
 @media (max-width: 600px) {
-#${MODAL_ID} .agy-ta-badge {
+#${MODAL_ID} .agy-ta-badge,
+#${MODAL_ID} .agy-ta-acct-pill {
 display: none;
 }
 #${MODAL_ID} .agy-ta-tab {
@@ -1417,7 +1646,7 @@ _empty: false,
 }
 let activityModalOpen = false;
 let portalOverlaySignaled = false;
-let activityActiveTab = 'daily'; // 'daily' | 'weekly' | 'monthly' | 'total'
+let activityActiveTab = 'daily'; // 'daily' | 'weekly' | 'monthly' | 'total' | 'accounts'
 let activityBreakdownMode = 'source'; // 'source' | 'model'
 let activityOverlayEl = null;
 let activityRefreshTimer = null;
@@ -1428,6 +1657,17 @@ let activityFetchSeq = 0;
 let activityRenderedTodayKey = null;
 let activityHoveredDate = null;
 let activityHoveredCell = null;
+let accountsAvailable = false;
+let accountsList = [];
+let accountsCurrentId = null;
+let accountsLoading = false;
+let accountsRefreshing = false;
+let accountsSwitchingId = null;
+let accountsPendingConfirmId = null;
+let accountsStatusMsg = '';
+let accountsErrorMsg = '';
+let accountsFetchSeq = 0;
+let accountsSwitchFallbackTimer = null;
 function setPortalOverlayOpenSafe(open) {
 try {
 if (electronObj && electronObj.ipcRenderer && typeof electronObj.ipcRenderer.invoke === 'function') {

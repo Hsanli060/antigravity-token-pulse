@@ -1,0 +1,511 @@
+#!/usr/bin/env node
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const vm = require('vm');
+const { EventEmitter } = require('events');
+
+const REPO_ROOT = path.resolve(__dirname, '..');
+const SRC_DIR = path.join(REPO_ROOT, 'src');
+const patchAsar = require(path.join(SRC_DIR, 'patch-asar.js'));
+
+function readSrc(name) {
+  return fs.readFileSync(path.join(SRC_DIR, name), 'utf8');
+}
+
+function createTempDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function removeDirSafe(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {}
+}
+
+function loadIpcBlockSandbox({ homeDir, envOverrides, execFileImpl, spawnImpl }) {
+  const handlers = new Map();
+  const fakeIpcMain = {
+    removeHandler(ch) {
+      handlers.delete(ch);
+    },
+    handle(ch, fn) {
+      handlers.set(ch, fn);
+    },
+  };
+  const fakeElectron = { ipcMain: fakeIpcMain };
+  const fakeOs = {
+    ...os,
+    homedir: () => homeDir,
+  };
+  const fakeChildProcess = {
+    execFile: execFileImpl,
+    spawn: spawnImpl,
+  };
+  const fakeProcess = {
+    ...process,
+    env: {
+      ...process.env,
+      ...envOverrides,
+    },
+  };
+  const sandboxRequire = (modName) => {
+    if (modName === 'electron') return fakeElectron;
+    if (modName === 'os') return fakeOs;
+    if (modName === 'child_process') return fakeChildProcess;
+    return require(modName);
+  };
+  const ipcCode = readSrc('ipc-block.js');
+  const context = vm.createContext({
+    require: sandboxRequire,
+    process: fakeProcess,
+    Buffer,
+    URL,
+    console,
+    setTimeout,
+    clearTimeout,
+    Promise,
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Array,
+    Object,
+    Number,
+    String,
+    Boolean,
+    RegExp,
+    Error,
+  });
+  new vm.Script(ipcCode, { filename: 'src/ipc-block.js' }).runInContext(context);
+  return handlers;
+}
+
+const TRUSTED_EVENT = {
+  senderFrame: {
+    url: 'http://127.0.0.1:41234/index.html',
+    parent: null,
+  },
+};
+
+const SAMPLE_LIST_PAYLOAD = {
+  schema_version: 1,
+  current_target: 'app',
+  accounts: [
+    {
+      id: 'acct_main_01',
+      email: 'alpha@example.com',
+      name: 'Alpha User',
+      custom_label: 'Main Pro',
+      disabled: false,
+      validation_blocked: false,
+      last_used: 1763500000,
+      is_current: true,
+      // Decoy credential fields that must never pass allowlist sanitization
+      token: { access_token: 'SECRET_ACCESS', refresh_token: 'SECRET_REFRESH' },
+      refresh_token: 'SECRET_TOP_LEVEL',
+      quota: {
+        last_updated: 1763500100,
+        subscription_tier: 'Google AI Pro',
+        is_forbidden: false,
+        models: [],
+        quota_groups: [
+          {
+            display_name: 'Gemini',
+            buckets: [
+              {
+                bucket_id: 'gemini-5h',
+                window: '5h',
+                remaining_fraction: 0.78,
+                remaining_fraction_known: true,
+                reset_time: '2026-11-20T05:00:00Z',
+              },
+              {
+                bucket_id: 'gemini-weekly',
+                window: 'weekly',
+                remaining_fraction: 0.42,
+                remaining_fraction_known: true,
+                reset_time: '2026-11-24T00:00:00Z',
+              },
+            ],
+          },
+          {
+            display_name: 'Claude and GPT',
+            buckets: [
+              {
+                bucket_id: '3p-5h',
+                window: '5h',
+                remaining_fraction: 0.9,
+                remaining_fraction_known: true,
+                reset_time: '2026-11-20T05:00:00Z',
+              },
+              {
+                bucket_id: '3p-weekly',
+                window: 'weekly',
+                remaining_fraction: 0.65,
+                remaining_fraction_known: true,
+                reset_time: '2026-11-24T00:00:00Z',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      id: 'acct_backup_02',
+      email: 'beta@example.com',
+      name: 'Beta User',
+      custom_label: null,
+      disabled: false,
+      validation_blocked: false,
+      last_used: 1763400000,
+      is_current: false,
+      quota: {
+        last_updated: 1763490000,
+        subscription_tier: 'Google AI Ultra',
+        is_forbidden: false,
+        models: [
+          {
+            name: 'gemini-4-hydrogen',
+            percentage: 95,
+            percentage_known: true,
+            reset_time: '2026-11-20T06:00:00Z',
+          },
+          {
+            name: 'gemini-4-neon',
+            percentage: 88,
+            percentage_known: true,
+            reset_time: '2026-11-20T05:30:00Z',
+          },
+        ],
+        quota_groups: null,
+      },
+    },
+    {
+      id: 'acct_disabled_03',
+      email: 'disabled@example.com',
+      name: 'Disabled User',
+      custom_label: null,
+      disabled: true,
+      validation_blocked: false,
+      last_used: 0,
+      is_current: false,
+      quota: null,
+    },
+  ],
+};
+
+async function runTests() {
+  let passed = 0;
+  const runCase = async (name, fn) => {
+    await fn();
+    passed += 1;
+    console.log(`PASS: ${name}`);
+  };
+
+  await runCase('1. Patcher & Installer marker and syntax validation', async () => {
+    const ipcRaw = readSrc('ipc-block.js');
+    const p1 = readSrc('preload-part1.js');
+    const p2 = readSrc('preload-part2.js');
+    const p3 = readSrc('preload-part3.js');
+    const cliStatus = readSrc('agy-statusline.js');
+
+    assert(ipcRaw.length >= 500 && ipcRaw.includes('TELEMETRY_MOD_IPC_START') && ipcRaw.includes('TELEMETRY_MOD_IPC_END'));
+    assert(p1.length >= 500 && p1.includes('TELEMETRY_MOD_PRELOAD_START') && p1.includes('installTelemetryBar'));
+    assert(p2.length >= 500 && p2.includes('refreshActivityModal'));
+    assert(p3.length >= 500 && p3.includes('TELEMETRY_MOD_PRELOAD_END'));
+    assert(cliStatus.startsWith('#!/usr/bin/env node') && cliStatus.includes('TELEMETRY_MOD_CLI_STATUSLINE'));
+
+    const patchedIpc = patchAsar.applyIpcPatch(
+      'const electron_1 = require("electron");\nregisterWcvIpcHandlers();\n//# sourceMappingURL=ipcHandlers.js.map\n',
+      ipcRaw
+    );
+    assert(patchedIpc.includes('telemetry:accounts-list'));
+    assert(patchedIpc.includes('telemetry:accounts-refresh'));
+    assert(patchedIpc.includes('telemetry:accounts-switch'));
+
+    const preloadCombined = [p1, p2, p3].join('\n');
+    const patchedPreload = patchAsar.applyPreloadPatch(
+      'const electron_1 = require("electron");\n//# sourceMappingURL=preload.js.map\n',
+      preloadCombined
+    );
+    assert(patchedPreload.includes('ta-tab-accounts'));
+    assert(patchedPreload.includes('telemetry:accounts-switch'));
+  });
+
+  await runCase('2. CLI absent degrades gracefully to available=false', async () => {
+    const tmpHome = createTempDir('agy-tp-absent-');
+    try {
+      let called = false;
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: {
+          ANTIGRAVITY_SWITCH_CLI: '',
+          LOCALAPPDATA: path.join(tmpHome, 'localappdata'),
+          ProgramFiles: path.join(tmpHome, 'progfiles'),
+          PATH: '',
+        },
+        execFileImpl: () => {
+          called = true;
+        },
+        spawnImpl: () => {
+          called = true;
+        },
+      });
+      const res = await handlers.get('telemetry:accounts-list')(TRUSTED_EVENT);
+      assert.strictEqual(res.available, false);
+      assert.strictEqual(res.reason, 'not_installed');
+      assert.strictEqual(Array.from(res.accounts).length, 0);
+      assert.strictEqual(called, false);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('3. Untrusted senderFrame is rejected on all account IPC handlers', async () => {
+    const tmpHome = createTempDir('agy-tp-sec-');
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+    try {
+      let invoked = false;
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
+        execFileImpl: () => { invoked = true; },
+        spawnImpl: () => { invoked = true; },
+      });
+      const badEvents = [
+        null,
+        { senderFrame: null },
+        { senderFrame: { url: 'https://evil.example.com/', parent: null } },
+        { senderFrame: { url: 'http://127.0.0.1:41234/', parent: {} } },
+        { senderFrame: { url: 'file:///C:/temp/x.html', parent: null } },
+      ];
+      for (const evt of badEvents) {
+        const r1 = await handlers.get('telemetry:accounts-list')(evt);
+        assert.strictEqual(r1.available, false);
+        const r2 = await handlers.get('telemetry:accounts-refresh')(evt);
+        assert.strictEqual(r2.refreshed, false);
+        const r3 = await handlers.get('telemetry:accounts-switch')(evt, 'acct_backup_02');
+        assert.strictEqual(r3.ok, false);
+      }
+      assert.strictEqual(invoked, false);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('4. accounts-list parses groups/models, resolves config dir, and strips credentials', async () => {
+    const tmpHome = createTempDir('agy-tp-list-');
+    const toolDir = path.join(tmpHome, 'cli-bin');
+    fs.mkdirSync(toolDir, { recursive: true });
+    const fakeCli = path.join(toolDir, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+    fs.mkdirSync(path.join(tmpHome, '.gemini'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpHome, '.gemini', 'telemetry-switch-cli.json'),
+      JSON.stringify({ cliPath: toolDir })
+    );
+    try {
+      const calls = [];
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: '', PATH: '' },
+        execFileImpl: (file, args, opts, cb) => {
+          calls.push({ file, args, opts });
+          cb(null, JSON.stringify(SAMPLE_LIST_PAYLOAD), '');
+        },
+        spawnImpl: () => { throw new Error('unexpected spawn'); },
+      });
+
+      const res = await handlers.get('telemetry:accounts-list')(TRUSTED_EVENT);
+      assert.strictEqual(res.available, true);
+      assert.strictEqual(res.error, null);
+      assert.strictEqual(res.currentId, 'acct_main_01');
+      assert.strictEqual(res.accounts.length, 3);
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(path.resolve(calls[0].file), path.resolve(fakeCli));
+      assert.deepStrictEqual(Array.from(calls[0].args), ['accounts', 'list', '--json']);
+      assert.strictEqual(calls[0].opts.shell, false);
+      assert.strictEqual(calls[0].opts.windowsHide, true);
+
+      const main = res.accounts[0];
+      assert.strictEqual(main.plan, 'PRO');
+      assert.strictEqual(main.label, 'Main Pro');
+      assert.strictEqual(main.quota.fiveHour.pct, 78);
+      assert.strictEqual(main.quota.weekly.pct, 42);
+      assert.strictEqual(main.quota.secondaryFiveHour.pct, 90);
+      assert.strictEqual(main.quota.secondaryWeekly.pct, 65);
+      // Verify zero credential leakage
+      const serialized = JSON.stringify(res);
+      assert(!serialized.includes('SECRET_ACCESS'));
+      assert(!serialized.includes('SECRET_REFRESH'));
+      assert(!serialized.includes('SECRET_TOP_LEVEL'));
+      assert.strictEqual(main.token, undefined);
+      assert.strictEqual(main.refresh_token, undefined);
+
+      // Verify legacy models[] fallback on acct_backup_02
+      const backup = res.accounts[1];
+      assert.strictEqual(backup.plan, 'ULTRA');
+      assert.strictEqual(backup.quota.fiveHour.pct, 88);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('5. accounts-refresh calls refresh --json then list --json with single-flight dedup', async () => {
+    const tmpHome = createTempDir('agy-tp-refresh-');
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+    try {
+      const seqArgs = [];
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
+        execFileImpl: (_file, args, _opts, cb) => {
+          seqArgs.push(args.join(' '));
+          setTimeout(() => {
+            if (args[0] === 'refresh') {
+              cb(null, JSON.stringify({ schema_version: 1, total: 2, success: 2, failed: 0, details: [] }), '');
+            } else {
+              cb(null, JSON.stringify(SAMPLE_LIST_PAYLOAD), '');
+            }
+          }, 25);
+        },
+        spawnImpl: () => { throw new Error('unexpected spawn'); },
+      });
+
+      const [r1, r2] = await Promise.all([
+        handlers.get('telemetry:accounts-refresh')(TRUSTED_EVENT),
+        handlers.get('telemetry:accounts-refresh')(TRUSTED_EVENT),
+      ]);
+      assert.strictEqual(r1.refreshed, true);
+      assert.strictEqual(r2.refreshed, true);
+      assert.strictEqual(r1.refreshSummary.success, 2);
+      assert.deepStrictEqual(seqArgs, ['refresh --json', 'accounts list --json']);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('6. accounts-switch blocks invalid/disabled IDs and spawns detached switch cleanly', async () => {
+    const tmpHome = createTempDir('agy-tp-switch-');
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+    try {
+      const spawns = [];
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
+        execFileImpl: (_file, _args, _opts, cb) => {
+          cb(null, JSON.stringify(SAMPLE_LIST_PAYLOAD), '');
+        },
+        spawnImpl: (file, args, opts) => {
+          const child = new EventEmitter();
+          let unrefCalled = false;
+          child.unref = () => { unrefCalled = true; };
+          spawns.push({ file, args, opts, getUnref: () => unrefCalled });
+          setImmediate(() => child.emit('spawn'));
+          return child;
+        },
+      });
+
+      // Injection & malformed IDs must fail immediately
+      for (const badId of ['', '   ', '../evil', 'acct_backup_02 && calc', 'a b', 'x'.repeat(129)]) {
+        const res = await handlers.get('telemetry:accounts-switch')(TRUSTED_EVENT, badId);
+        assert.strictEqual(res.ok, false);
+      }
+      // Disabled account must be rejected
+      const disabledRes = await handlers.get('telemetry:accounts-switch')(TRUSTED_EVENT, 'acct_disabled_03');
+      assert.strictEqual(disabledRes.ok, false);
+      // Unknown account must be rejected
+      const missingRes = await handlers.get('telemetry:accounts-switch')(TRUSTED_EVENT, 'acct_nonexistent');
+      assert.strictEqual(missingRes.ok, false);
+      assert.strictEqual(spawns.length, 0);
+
+      // Valid healthy inactive account triggers detached spawn
+      const okRes = await handlers.get('telemetry:accounts-switch')(TRUSTED_EVENT, 'acct_backup_02');
+      assert.strictEqual(okRes.ok, true);
+      assert.strictEqual(okRes.switching, true);
+      assert.strictEqual(okRes.accountId, 'acct_backup_02');
+      assert.strictEqual(spawns.length, 1);
+      assert.deepStrictEqual(Array.from(spawns[0].args), ['switch', 'acct_backup_02', '--target', 'app', '--json']);
+      assert.strictEqual(spawns[0].opts.detached, true);
+      assert.strictEqual(spawns[0].opts.stdio, 'ignore');
+      assert.strictEqual(spawns[0].opts.windowsHide, true);
+      assert.strictEqual(spawns[0].opts.shell, false);
+      assert.strictEqual(spawns[0].getUnref(), true);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('7. Privacy audit: zero hardcoded user paths, personal emails, or OAuth secrets in src/', async () => {
+    const files = ['ipc-block.js', 'preload-part1.js', 'preload-part2.js', 'preload-part3.js'];
+    const oauthRe = new RegExp('GOCSPX' + '-|apps\\.googleusercontent\\.com', 'i');
+    for (const f of files) {
+      const content = readSrc(f);
+      assert(!/[A-Za-z]:[\\/]+Users[\\/]+[^\\/'"`\s$%]+/i.test(content), `Found hardcoded user path in ${f}`);
+      assert(!oauthRe.test(content), `Found Google OAuth secret/client in ${f}`);
+      assert(!/@qq\.com|@gmail\.com/i.test(content), `Found personal email in ${f}`);
+    }
+  });
+
+  await runCase('8. Patcher round-trip idempotency and clean restore', async () => {
+    const ipcRaw = readSrc('ipc-block.js');
+    const preloadRaw = [readSrc('preload-part1.js'), readSrc('preload-part2.js'), readSrc('preload-part3.js')].join('\n');
+    const origIpc = 'const electron_1 = require("electron");\nregisterWcvIpcHandlers();\n';
+    const origPreload = 'const electron_1 = require("electron");\nconsole.log("orig");\n';
+
+    const ipcOnce = patchAsar.applyIpcPatch(origIpc, ipcRaw);
+    const ipcTwice = patchAsar.applyIpcPatch(ipcOnce, ipcRaw);
+    assert.strictEqual(ipcOnce, ipcTwice);
+    assert.strictEqual(patchAsar.stripIpcPatch(ipcOnce).trim(), origIpc.trim());
+
+    const preOnce = patchAsar.applyPreloadPatch(origPreload, preloadRaw);
+    const preTwice = patchAsar.applyPreloadPatch(preOnce, preloadRaw);
+    assert.strictEqual(preOnce, preTwice);
+    assert.strictEqual(patchAsar.stripPreloadPatch(preOnce).trim(), origPreload.trim());
+  });
+
+  await runCase('9. Preload UI helpers, XSS escaping, and default-hidden account switcher markup', async () => {
+    const combined = [readSrc('preload-part1.js'), readSrc('preload-part2.js'), readSrc('preload-part3.js')].join('\n');
+    // Verify modal template defaults account tab, header pill, and accounts section to hidden
+    assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
+    assert(combined.includes('data-role="ta-acct-pill" hidden'));
+    assert(combined.includes('data-role="ta-accounts-section" hidden'));
+    // Verify inline two-step confirmation markup exists (no accidental 1-click restart)
+    assert(combined.includes('data-action="acct-switch"'));
+    assert(combined.includes('data-action="acct-confirm"'));
+    assert(combined.includes('data-action="acct-cancel"'));
+    // Verify renderer never references raw token fields
+    assert(!combined.includes('refresh_token'));
+    assert(!combined.includes('access_token'));
+    // Verify helper functions execute cleanly in an isolated VM context
+    const fnStart = combined.indexOf('function escHtml(');
+    const fnEnd = combined.indexOf('function calcCachePct(');
+    const qStart = combined.indexOf('function formatResetCountdown(');
+    const qEnd = combined.indexOf('function syncAccountsChromeAndVisibility(');
+    assert(fnStart > 0 && fnEnd > fnStart && qStart > 0 && qEnd > qStart);
+    const helperCtx = vm.createContext({ Date, Math, Number, String });
+    new vm.Script(combined.slice(fnStart, fnEnd) + '\n' + combined.slice(qStart, qEnd)).runInContext(helperCtx);
+    const html = helperCtx.renderQuotaBarHtml('<img src=x onerror=1>', { pct: 65, resetTime: new Date(Date.now() + 7500000).toISOString() });
+    assert(html.includes('&lt;img src=x onerror=1&gt;'));
+    assert(!html.includes('<img '));
+    assert(html.includes('65%'));
+    assert.strictEqual(helperCtx.getQuotaBarColor(75), 'var(--agy-ta-q-good)');
+    assert.strictEqual(helperCtx.getQuotaBarColor(30), 'var(--agy-ta-q-warn)');
+    assert.strictEqual(helperCtx.getQuotaBarColor(10), 'var(--agy-ta-q-low)');
+  });
+
+  console.log(`\nAll ${passed} tests passed!`);
+}
+
+runTests().catch((err) => {
+  console.error('TEST FAILED:', err);
+  process.exit(1);
+});

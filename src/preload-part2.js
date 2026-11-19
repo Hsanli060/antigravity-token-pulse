@@ -587,6 +587,360 @@ ${modelPanelHtml}
 }
 listEl.scrollTop = prevScroll;
 }
+function formatResetCountdown(resetTimeStr) {
+if (typeof resetTimeStr !== 'string' || !resetTimeStr.trim()) {
+return '';
+}
+const ts = Date.parse(resetTimeStr.trim());
+if (!Number.isFinite(ts)) {
+return '';
+}
+const diffMs = ts - Date.now();
+if (diffMs <= 60000) {
+return '即将重置';
+}
+const totalMin = Math.round(diffMs / 60000);
+const days = Math.floor(totalMin / (60 * 24));
+const hours = Math.floor((totalMin % (60 * 24)) / 60);
+const mins = totalMin % 60;
+if (days > 0) {
+return `${days}天${hours > 0 ? ` ${hours}h` : ''} 后重置`;
+}
+if (hours > 0) {
+return `${hours}h${mins > 0 ? ` ${mins}m` : ''} 后重置`;
+}
+return `${mins}m 后重置`;
+}
+function formatUpdatedAgo(unixSec) {
+const sec = Number(unixSec) || 0;
+if (sec <= 0) {
+return '';
+}
+const diffSec = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+if (diffSec < 60) {
+return '刚刚更新';
+}
+const mins = Math.floor(diffSec / 60);
+if (mins < 60) {
+return `${mins} 分钟前更新`;
+}
+const hours = Math.floor(mins / 60);
+if (hours < 24) {
+return `${hours} 小时前更新`;
+}
+const days = Math.floor(hours / 24);
+return `${days} 天前更新`;
+}
+function getQuotaBarColor(pct) {
+if (pct === null || pct === undefined || !Number.isFinite(Number(pct))) {
+return 'var(--agy-ta-muted)';
+}
+const n = Number(pct);
+if (n >= 50) return 'var(--agy-ta-q-good)';
+if (n >= 20) return 'var(--agy-ta-q-warn)';
+return 'var(--agy-ta-q-low)';
+}
+function renderQuotaBarHtml(label, bucket) {
+const pct = bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null;
+const resetTxt = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
+const valTxt = pct !== null ? `${pct}%${resetTxt ? ` · ${resetTxt}` : ''}` : '未知';
+const widthPct = pct !== null ? pct : 0;
+const fillColor = getQuotaBarColor(pct);
+return `
+<div class="agy-ta-comp-item">
+<div class="agy-ta-comp-head">
+<span class="agy-ta-comp-label" title="${escHtml(label)}"><span class="agy-ta-ellipsis">${escHtml(label)}</span></span>
+<span class="agy-ta-comp-val" title="${escHtml(valTxt)}">${escHtml(valTxt)}</span>
+</div>
+<div class="agy-ta-comp-track">
+<div class="agy-ta-comp-fill" style="width:${widthPct}%; background:${fillColor};"></div>
+</div>
+</div>
+`;
+}
+function syncAccountsChromeAndVisibility() {
+if (!activityOverlayEl) {
+return;
+}
+if (!accountsAvailable && activityActiveTab === 'accounts') {
+activityActiveTab = 'daily';
+}
+const acctTabBtn = activityOverlayEl.querySelector('[data-role="ta-tab-accounts"]');
+if (acctTabBtn) {
+acctTabBtn.hidden = !accountsAvailable;
+}
+const acctPill = activityOverlayEl.querySelector('[data-role="ta-acct-pill"]');
+if (acctPill) {
+const activeAcct = accountsList.find((a) => a && (a.isCurrent || a.id === accountsCurrentId)) || null;
+if (accountsAvailable && activeAcct) {
+const shortName = activeAcct.label || activeAcct.email || activeAcct.name || activeAcct.id;
+const planTxt = activeAcct.plan && activeAcct.plan !== 'UNKNOWN' ? ` · ${activeAcct.plan}` : '';
+acctPill.innerHTML = `<span class="agy-ta-ellipsis">${escHtml(shortName)}${escHtml(planTxt)}</span>`;
+acctPill.title = `当前账号：${activeAcct.email || shortName}（点击管理与切换）`;
+acctPill.hidden = false;
+}
+else {
+acctPill.hidden = true;
+}
+}
+const isAccountsView = accountsAvailable && activityActiveTab === 'accounts';
+const kpisEl = activityOverlayEl.querySelector('.agy-ta-kpis');
+const heatmapEl = activityOverlayEl.querySelector('.agy-ta-heatmap-section');
+const breakdownEl = activityOverlayEl.querySelector('.agy-ta-breakdown-section');
+const accountsSec = activityOverlayEl.querySelector('[data-role="ta-accounts-section"]');
+if (kpisEl) kpisEl.style.display = isAccountsView ? 'none' : '';
+if (heatmapEl) heatmapEl.style.display = isAccountsView ? 'none' : '';
+if (breakdownEl) breakdownEl.style.display = isAccountsView ? 'none' : '';
+if (accountsSec) accountsSec.hidden = !isAccountsView;
+if (isAccountsView) {
+hideActivityTooltip();
+}
+}
+function renderAccountsSection() {
+if (!activityOverlayEl) {
+return;
+}
+syncAccountsChromeAndVisibility();
+if (!accountsAvailable) {
+return;
+}
+const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
+const refreshBtn = activityOverlayEl.querySelector('[data-action="acct-refresh"]');
+const noticeEl = activityOverlayEl.querySelector('[data-role="ta-acct-notice"]');
+const listEl = activityOverlayEl.querySelector('[data-role="ta-acct-list"]');
+if (metaEl) {
+let latestTs = 0;
+for (const a of accountsList) {
+if (a && Number(a.lastUpdated) > latestTs) {
+latestTs = Number(a.lastUpdated);
+}
+}
+const agoTxt = formatUpdatedAgo(latestTs);
+metaEl.textContent = accountsLoading
+? '读取本地账号列表...'
+: `共 ${accountsList.length} 个账号${agoTxt ? ` · ${agoTxt}` : ''}`;
+}
+if (refreshBtn) {
+const busy = accountsRefreshing || Boolean(accountsSwitchingId);
+refreshBtn.disabled = busy;
+refreshBtn.textContent = accountsRefreshing ? '刷新中...' : '刷新额度';
+}
+if (noticeEl) {
+if (accountsErrorMsg) {
+noticeEl.className = 'agy-ta-acct-notice is-error';
+noticeEl.textContent = accountsErrorMsg;
+noticeEl.hidden = false;
+}
+else if (accountsSwitchingId) {
+noticeEl.className = 'agy-ta-acct-notice is-warn';
+noticeEl.textContent = accountsStatusMsg || '正在调用 agy-switch 切换账号并重启 Antigravity 2.0，请勿重复点击...';
+noticeEl.hidden = false;
+}
+else if (accountsStatusMsg) {
+noticeEl.className = 'agy-ta-acct-notice';
+noticeEl.textContent = accountsStatusMsg;
+noticeEl.hidden = false;
+}
+else {
+noticeEl.hidden = true;
+}
+}
+if (!listEl) {
+return;
+}
+const prevScroll = listEl.scrollTop;
+if (accountsLoading && accountsList.length === 0) {
+listEl.innerHTML = `<div class="agy-ta-empty">正在读取本地账号缓存...</div>`;
+return;
+}
+if (accountsList.length === 0) {
+listEl.innerHTML = `<div class="agy-ta-empty">未检测到已保存的账号，请先在终端运行 agy-switch（或打开其客户端）添加账号</div>`;
+return;
+}
+listEl.innerHTML = accountsList.map((acct) => {
+const isCurrent = Boolean(acct.isCurrent || (accountsCurrentId && acct.id === accountsCurrentId));
+const isUnavailable = Boolean(acct.disabled || acct.validationBlocked);
+const isSwitchingThis = accountsSwitchingId === acct.id;
+const isConfirming = !isCurrent && !isUnavailable && !accountsSwitchingId && accountsPendingConfirmId === acct.id;
+const titleEmail = acct.email || acct.name || acct.id;
+const planBadge = acct.plan && acct.plan !== 'UNKNOWN'
+? `<span class="agy-ta-tag" title="${escHtml(acct.planRaw || acct.plan)}">${escHtml(acct.plan)}</span>`
+: '';
+const labelBadge = acct.label
+? `<span class="agy-ta-acct-label agy-ta-ellipsis" title="${escHtml(acct.label)}">${escHtml(acct.label)}</span>`
+: '';
+const statusTags = [
+isCurrent ? `<span class="agy-ta-tag">当前使用</span>` : '',
+acct.disabled ? `<span class="agy-ta-tag agy-ta-acct-tag-danger">已禁用</span>` : '',
+acct.validationBlocked ? `<span class="agy-ta-tag agy-ta-acct-tag-warn">需验证</span>` : '',
+acct.isForbidden ? `<span class="agy-ta-tag agy-ta-acct-tag-danger">配额受限</span>` : '',
+].filter(Boolean).join('');
+let actionHtml = '';
+if (isCurrent) {
+actionHtml = `<span class="agy-ta-acct-state-lbl">当前账号</span>`;
+}
+else if (isUnavailable) {
+actionHtml = `<span class="agy-ta-acct-state-lbl">不可切换</span>`;
+}
+else if (isSwitchingThis) {
+actionHtml = `<button type="button" class="agy-ta-acct-btn" disabled>切换中...</button>`;
+}
+else if (isConfirming) {
+actionHtml = `
+<span class="agy-ta-acct-confirm-hint">将重启客户端?</span>
+<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-confirm" data-account-id="${escHtml(acct.id)}">确认切换</button>
+<button type="button" class="agy-ta-acct-btn" data-action="acct-cancel">取消</button>
+`;
+}
+else {
+actionHtml = `<button type="button" class="agy-ta-acct-btn" data-action="acct-switch" data-account-id="${escHtml(acct.id)}"${accountsSwitchingId ? ' disabled' : ''}>切换</button>`;
+}
+const q = acct.quota || {};
+const fiveBar = renderQuotaBarHtml('Gemini 5h 额度', q.fiveHour);
+const weekBar = renderQuotaBarHtml('Gemini 周额度', q.weekly);
+let secondaryHtml = '';
+const sec5 = q.secondaryFiveHour && typeof q.secondaryFiveHour.pct === 'number' ? `${q.secondaryFiveHour.pct}%` : null;
+const secW = q.secondaryWeekly && typeof q.secondaryWeekly.pct === 'number' ? `${q.secondaryWeekly.pct}%` : null;
+if (sec5 !== null || secW !== null) {
+const secName = q.secondaryLabel || 'Claude / GPT';
+secondaryHtml = `
+<div class="agy-ta-acct-secondary">
+<span class="agy-ta-ellipsis" title="${escHtml(secName)}">${escHtml(secName)}</span>
+<span>5h ${escHtml(sec5 !== null ? sec5 : '—')} · 周 ${escHtml(secW !== null ? secW : '—')}</span>
+</div>
+`;
+}
+return `
+<div class="agy-ta-row agy-ta-acct-row${isCurrent ? ' is-active' : ''}${isUnavailable ? ' is-disabled' : ''}">
+<div class="agy-ta-acct-top">
+<div class="agy-ta-acct-identity">
+<span class="agy-ta-acct-email agy-ta-ellipsis" title="${escHtml(titleEmail)}">${escHtml(titleEmail)}</span>
+${labelBadge}
+${planBadge}
+${statusTags}
+</div>
+<div class="agy-ta-acct-actions">${actionHtml}</div>
+</div>
+<div class="agy-ta-acct-quotas">
+${fiveBar}
+${weekBar}
+</div>
+${secondaryHtml}
+</div>
+`;
+}).join('');
+listEl.scrollTop = prevScroll;
+}
+async function refreshAccountsList(forceRemote) {
+if (!activityModalOpen) {
+return;
+}
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+accountsAvailable = false;
+syncAccountsChromeAndVisibility();
+return;
+}
+if (forceRemote && accountsRefreshing) {
+return;
+}
+const seq = ++accountsFetchSeq;
+if (forceRemote) {
+accountsRefreshing = true;
+accountsErrorMsg = '';
+accountsStatusMsg = '';
+renderAccountsSection();
+}
+else if (!accountsAvailable && accountsList.length === 0) {
+accountsLoading = true;
+}
+try {
+const channel = forceRemote ? 'telemetry:accounts-refresh' : 'telemetry:accounts-list';
+const res = await electronObj.ipcRenderer.invoke(channel);
+if (!activityModalOpen || seq !== accountsFetchSeq) {
+return;
+}
+accountsLoading = false;
+accountsRefreshing = false;
+if (!res || typeof res !== 'object' || !res.available) {
+accountsAvailable = false;
+accountsList = [];
+accountsCurrentId = null;
+accountsPendingConfirmId = null;
+renderActivityModalData();
+return;
+}
+accountsAvailable = true;
+accountsList = Array.isArray(res.accounts) ? res.accounts : [];
+accountsCurrentId = typeof res.currentId === 'string' ? res.currentId : null;
+if (accountsPendingConfirmId && !accountsList.some((a) => a && a.id === accountsPendingConfirmId)) {
+accountsPendingConfirmId = null;
+}
+accountsErrorMsg = typeof res.error === 'string' && res.error ? res.error : '';
+if (forceRemote && res.refreshed && res.refreshSummary) {
+const s = res.refreshSummary;
+accountsStatusMsg = `已刷新 ${Number(s.success) || 0}/${Number(s.total) || accountsList.length} 个账号额度${Number(s.failed) > 0 ? `（${Number(s.failed)} 个失败）` : ''}`;
+}
+renderActivityModalData();
+renderAccountsSection();
+}
+catch {
+if (!activityModalOpen || seq !== accountsFetchSeq) {
+return;
+}
+accountsLoading = false;
+accountsRefreshing = false;
+if (forceRemote) {
+accountsErrorMsg = '刷新额度失败，请稍后重试或检查网络代理';
+renderAccountsSection();
+}
+}
+}
+async function triggerAccountSwitch(accountId) {
+if (!activityModalOpen || !accountId || accountsSwitchingId) {
+return;
+}
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+return;
+}
+accountsPendingConfirmId = null;
+accountsSwitchingId = accountId;
+accountsErrorMsg = '';
+accountsStatusMsg = '正在调用 agy-switch 切换账号并重启 Antigravity 2.0（同时同步 agy CLI），请稍候...';
+renderAccountsSection();
+try {
+const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-switch', accountId);
+if (!activityModalOpen) {
+return;
+}
+if (!res || !res.ok) {
+accountsSwitchingId = null;
+accountsStatusMsg = '';
+accountsErrorMsg = (res && typeof res.error === 'string' && res.error) ? res.error : '账号切换启动失败';
+renderAccountsSection();
+return;
+}
+if (accountsSwitchFallbackTimer) {
+clearTimeout(accountsSwitchFallbackTimer);
+}
+accountsSwitchFallbackTimer = setTimeout(() => {
+accountsSwitchFallbackTimer = null;
+if (activityModalOpen && accountsSwitchingId === accountId) {
+accountsSwitchingId = null;
+accountsStatusMsg = '已发送切换指令；若客户端未自动重启，请在终端检查 agy-switch 状态或手动重启 Antigravity 2.0';
+renderAccountsSection();
+}
+}, 25000);
+}
+catch {
+if (!activityModalOpen) {
+return;
+}
+accountsSwitchingId = null;
+accountsStatusMsg = '';
+accountsErrorMsg = '调用切换指令失败';
+renderAccountsSection();
+}
+}
 function renderActivityModalData() {
 if (!activityOverlayEl)
 return;
@@ -634,10 +988,13 @@ if (activityHoveredDate && activityHoveredCell) {
 showActivityTooltip(activityHoveredCell, activityHoveredDate);
 }
 const tabBtns = activityOverlayEl.querySelectorAll('.agy-ta-tab[data-tab]');
+syncAccountsChromeAndVisibility();
 for (const btn of tabBtns) {
 btn.classList.toggle('is-active', btn.getAttribute('data-tab') === activityActiveTab);
 }
+if (activityActiveTab !== 'accounts') {
 renderBreakdownSection(stats);
+}
 }
 async function refreshActivityModal() {
 if (!activityModalOpen)
@@ -679,6 +1036,15 @@ activityModalOpen = false;
 activityHoveredDate = null;
 activityHoveredCell = null;
 activityRenderedTodayKey = null;
+accountsPendingConfirmId = null;
+accountsSwitchingId = null;
+accountsRefreshing = false;
+accountsErrorMsg = '';
+accountsStatusMsg = '';
+if (accountsSwitchFallbackTimer) {
+clearTimeout(accountsSwitchFallbackTimer);
+accountsSwitchFallbackTimer = null;
+}
 if (activityRefreshTimer) {
 clearInterval(activityRefreshTimer);
 activityRefreshTimer = null;
@@ -698,6 +1064,10 @@ setPortalOverlayOpenSafe(false);
 }
 function handleBeforeUnload() {
 try {
+if (accountsSwitchFallbackTimer) {
+clearTimeout(accountsSwitchFallbackTimer);
+accountsSwitchFallbackTimer = null;
+}
 if (activityModalOpen || portalOverlaySignaled) {
 activityModalOpen = false;
 activityHoveredDate = null;
@@ -741,6 +1111,7 @@ overlay.innerHTML = `
 <div class="agy-ta-title-wrap">
 <span class="agy-ta-title">Token 活动</span>
 <span class="agy-ta-badge" title="Desktop + CLI 同步"><span class="agy-ta-badge-dot"></span><span class="agy-ta-ellipsis">Desktop + CLI 同步</span></span>
+<button type="button" class="agy-ta-acct-pill" data-role="ta-acct-pill" hidden></button>
 </div>
 <div class="agy-ta-controls">
 <div class="agy-ta-tabs">
@@ -748,6 +1119,7 @@ overlay.innerHTML = `
 <button type="button" class="agy-ta-tab" data-tab="weekly">每周</button>
 <button type="button" class="agy-ta-tab" data-tab="monthly">每月</button>
 <button type="button" class="agy-ta-tab" data-tab="total">累计总量</button>
+<button type="button" class="agy-ta-tab" data-tab="accounts" data-role="ta-tab-accounts" hidden>账号</button>
 </div>
 <button type="button" class="agy-ta-close" data-role="ta-close" title="关闭 (Esc)">×</button>
 </div>
@@ -810,6 +1182,19 @@ overlay.innerHTML = `
 </div>
 <div class="agy-ta-breakdown-list" data-role="ta-bd-list"></div>
 </div>
+<div class="agy-ta-accounts-section" data-role="ta-accounts-section" hidden>
+<div class="agy-ta-section-head">
+<div class="agy-ta-acct-head-left">
+<span class="agy-ta-section-title">账号与额度</span>
+<span class="agy-ta-acct-meta" data-role="ta-acct-meta"></span>
+</div>
+<div class="agy-ta-acct-head-actions">
+<button type="button" class="agy-ta-acct-btn" data-action="acct-refresh">刷新额度</button>
+</div>
+</div>
+<div class="agy-ta-acct-notice" data-role="ta-acct-notice" hidden></div>
+<div class="agy-ta-acct-list" data-role="ta-acct-list"></div>
+</div>
 <div class="agy-ta-tooltip" data-role="ta-tooltip">
 <div class="agy-ta-tt-date" data-role="tt-date"></div>
 <div class="agy-ta-tt-total" data-role="tt-total"></div>
@@ -839,8 +1224,56 @@ for (const btn of tabBtns) {
 btn.addEventListener('click', () => {
 const nextTab = btn.getAttribute('data-tab');
 if (nextTab && nextTab !== activityActiveTab) {
+accountsPendingConfirmId = null;
 activityActiveTab = nextTab;
 renderActivityModalData();
+if (nextTab === 'accounts') {
+renderAccountsSection();
+void refreshAccountsList(false);
+}
+}
+});
+}
+const acctPillBtn = overlay.querySelector('[data-role="ta-acct-pill"]');
+if (acctPillBtn) {
+acctPillBtn.addEventListener('click', () => {
+if (accountsAvailable && activityActiveTab !== 'accounts') {
+accountsPendingConfirmId = null;
+activityActiveTab = 'accounts';
+renderActivityModalData();
+renderAccountsSection();
+void refreshAccountsList(false);
+}
+});
+}
+const accountsSecEl = overlay.querySelector('[data-role="ta-accounts-section"]');
+if (accountsSecEl) {
+accountsSecEl.addEventListener('click', (e) => {
+const actionEl = e.target && e.target.closest ? e.target.closest('[data-action]') : null;
+if (!actionEl) {
+return;
+}
+const action = actionEl.getAttribute('data-action');
+if (action === 'acct-refresh') {
+void refreshAccountsList(true);
+}
+else if (action === 'acct-switch') {
+const id = actionEl.getAttribute('data-account-id');
+if (id && !accountsSwitchingId) {
+accountsPendingConfirmId = id;
+accountsErrorMsg = '';
+renderAccountsSection();
+}
+}
+else if (action === 'acct-cancel') {
+accountsPendingConfirmId = null;
+renderAccountsSection();
+}
+else if (action === 'acct-confirm') {
+const id = actionEl.getAttribute('data-account-id');
+if (id) {
+void triggerAccountSwitch(id);
+}
 }
 });
 }
@@ -899,5 +1332,6 @@ activityOverlayEl = overlay;
 (g.document.body || g.document.documentElement).appendChild(overlay);
 renderActivityModalData();
 void refreshActivityModal();
+void refreshAccountsList(false);
 activityRefreshTimer = setInterval(() => {
 void refreshActivityModal();

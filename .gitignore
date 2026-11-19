@@ -1,0 +1,21 @@
+# Dependencies & OS junk
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Patcher backups & temporary files
+*.bak
+*.tmp
+*.log
+app-extracted/
+test-artifacts/
+
+# Sensitive local credential / account files (never commit)
+.antigravity_tools/
+accounts.json
+*oauth*
+*token*.json
+*credential*
+telemetry-switch-cli.json
+.env
+.env.*

@@ -26,6 +26,17 @@
   - **自适应浅 / 深色主题**：底栏文字、SVG 图标与 Token 活动热力图弹窗均会自动感知 Antigravity 2.0 官方浅色 / 深色主题并实时切换配色，切换主题无需重启客户端
 - **桌面端 + CLI 数据自动合并**：`agy` CLI 的实时 Token 消耗会自动同步到 `~/.gemini/telemetry-activity-cache.json`（支持 `ANTIGRAVITY_CLI_HOME` 自定义路径），桌面端热力图自动聚合 Antigravity 2.0 与 `agy` 两端历史对话账本。
 
+### 2.5 可选外部 CLI 账号切换桥接（默认隐藏、按需启用）
+- **零侵入设计**：本插件本身**不包含**任何 OAuth 密钥、账号凭据读写或网络配额接口；仅在检测到本机存在外部 [`agy-switch`](https://github.com/anglee0323/agy-switch) 命令行程序（`agy-switch.exe` / `agy-switch`）时，在 Token 活动弹窗中自动显示 **「账号」** 标签页（未安装时完全隐藏，零界面干扰）。
+- **核心交互**：
+  - 打开弹窗仅读取外部 CLI 本地缓存（不触发网络请求），展示已保存账号的套餐标签与 5 小时 / 周剩余额度；
+  - 提供手动 **「刷新额度」** 按钮（不开启后台定时轮询）；
+  - 点击 **「切换」** 后需二次内联确认（**「确认切换 / 取消」**），防误触；确认后以独立脱离子进程（`detached`、`shell: false`）交由 `agy-switch` 优雅关闭并重启客户端，同步切换 Antigravity 2.0 与 `agy` CLI。
+- **CLI 路径自动探测顺序**（无需改代码）：
+  1. 环境变量 `ANTIGRAVITY_SWITCH_CLI`（可填可执行文件路径或其所在目录）
+  2. 本地配置文件 `~/.gemini/telemetry-switch-cli.json` 中的 `{"cliPath": "..."}`
+  3. 常见默认安装目录（如 Windows 下的 `%LOCALAPPDATA%\agy-switch\agy-switch.exe`、`%LOCALAPPDATA%\Programs\agy-switch\agy-switch.exe`、`~/.gemini/tools/agy-switch/agy-switch.exe`）及系统 `PATH`
+
 ### 3. 一键安装 / 升级 / 还原
 - [`Antigravity-Telemetry-Installer.bat`](Antigravity-Telemetry-Installer.bat) 内置纯 Windows PowerShell + .NET **内存级 ASAR 注入与 SHA-256 多块完整性重算引擎**：
   - **无需安装 Node.js / npm / `asar`**（仅 `agy` CLI 状态栏需要 Node.js >= 18）
@@ -182,11 +193,14 @@ antigravity-token-pulse/
 ├── Antigravity-Telemetry-Installer.bat   # 一键安装 / 升级 / 恢复器（离线读取 src/ 或在线镜像拉取）
 ├── src/
 │   ├── patch-asar.js                     # 桌面端 ASAR 独立注入脚本（支持目录与 .asar 原地注入/还原）
-│   ├── ipc-block.js                      # Electron 主进程 IPC 数据采集与账本聚合模块
+│   ├── ipc-block.js                      # Electron 主进程 IPC 数据采集、账本聚合与可选外部 CLI 桥接模块
 │   ├── preload-part1.js                  # 渲染层样式表与主题/工具函数模块 (1/3)
-│   ├── preload-part2.js                  # Token 活动热力图弹窗与交互视图模块 (2/3)
+│   ├── preload-part2.js                  # Token 活动热力图与可选账号管理弹窗视图模块 (2/3)
 │   ├── preload-part3.js                  # 实时遥测栏 DOM 挂载与轮询模块 (3/3)
 │   └── agy-statusline.js                 # agy CLI 终端状态栏 + Token 缓存同步脚本
+├── tests/
+│   └── account-switcher-bridge.test.js   # 外部 CLI 桥接安全、解析与注入语法自动化测试
+├── .gitignore
 ├── LICENSE                               # MIT License
 └── README.md
 ```
@@ -196,6 +210,7 @@ antigravity-token-pulse/
 ## 隐私与安全说明
 
 - **100% 本地统计**：所有 Token 读取与热力图统计均只访问本地 `~/.gemini/antigravity/...`、`~/.gemini/antigravity-cli/...` 与 `~/.gemini/telemetry-activity-cache.json`，**不上传任何对话或统计数据到任何服务器**。
+- **可选外部 CLI 桥接安全边界**：账号切换 IPC 仅校验本地 `localhost`/`127.0.0.1` 顶层来源、以 `shell: false` 严格白名单调用用户自行安装的外部 `agy-switch` CLI，**绝不向渲染层传递任何 Token / 密钥字段**；未安装外部 CLI 时功能自动隐藏。
 - **全部源码可审计**：`src/` 目录下所有注入模块均为明文 JavaScript，安装器不会执行任何隐藏二进制。
 
 ---

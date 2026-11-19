@@ -756,5 +756,487 @@ days: {},
 };
 }
 });
+
+// --- External Account Switcher CLI Bridge (Optional, Capability-Gated, Zero Credentials) ---
+const childProcessTelemetry = require('child_process');
+const SWITCH_ACCOUNT_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+const SWITCH_CLI_CONFIG_FILE = 'telemetry-switch-cli.json';
+let accountsRefreshInFlight = null;
+let accountsSwitchInFlight = false;
+
+function isTrustedLocalSender(event) {
+  try {
+    const frame = event && event.senderFrame;
+    if (!frame || frame.parent) {
+      return false;
+    }
+    const rawUrl = typeof frame.url === 'string' ? frame.url : '';
+    if (!rawUrl) {
+      return false;
+    }
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    const host = (parsed.hostname || '').toLowerCase();
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeSafeText(val, maxLen) {
+  if (typeof val !== 'string') {
+    return '';
+  }
+  const cleaned = val.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+}
+
+function isValidSwitchCliBinary(candidatePath) {
+  try {
+    if (typeof candidatePath !== 'string') {
+      return false;
+    }
+    const trimmed = candidatePath.trim();
+    if (!trimmed || /[\u0000-\u001f]/.test(trimmed)) {
+      return false;
+    }
+    const resolved = pathTelemetry.resolve(trimmed);
+    if (!pathTelemetry.isAbsolute(resolved)) {
+      return false;
+    }
+    if (process.platform === 'win32' && !/\.exe$/i.test(resolved)) {
+      return false;
+    }
+    const st = fsTelemetry.statSync(resolved);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function readConfiguredSwitchCliPath(homeDir) {
+  try {
+    const cfgPath = pathTelemetry.join(homeDir, '.gemini', SWITCH_CLI_CONFIG_FILE);
+    if (!fsTelemetry.existsSync(cfgPath)) {
+      return '';
+    }
+    const raw = stripBom(fsTelemetry.readFileSync(cfgPath, 'utf-8'));
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.cliPath === 'string' ? parsed.cliPath.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveSwitchCliPath() {
+  const homeDir = osTelemetry.homedir();
+  const isWin = process.platform === 'win32';
+  const binName = isWin ? 'agy-switch.exe' : 'agy-switch';
+  const explicitCandidates = [];
+  if (typeof process.env.ANTIGRAVITY_SWITCH_CLI === 'string' && process.env.ANTIGRAVITY_SWITCH_CLI.trim()) {
+    explicitCandidates.push(process.env.ANTIGRAVITY_SWITCH_CLI.trim());
+  }
+  const cfgPath = readConfiguredSwitchCliPath(homeDir);
+  if (cfgPath) {
+    explicitCandidates.push(cfgPath);
+  }
+  for (const cand of explicitCandidates) {
+    if (isValidSwitchCliBinary(cand)) {
+      return pathTelemetry.resolve(cand);
+    }
+    try {
+      const resolvedDir = pathTelemetry.resolve(cand);
+      if (fsTelemetry.statSync(resolvedDir).isDirectory()) {
+        const nested = pathTelemetry.join(resolvedDir, binName);
+        if (isValidSwitchCliBinary(nested)) {
+          return nested;
+        }
+      }
+    } catch {}
+  }
+
+  const knownCandidates = [];
+  if (isWin) {
+    const localAppData = typeof process.env.LOCALAPPDATA === 'string' ? process.env.LOCALAPPDATA.trim() : '';
+    const programFiles = typeof process.env.ProgramFiles === 'string' ? process.env.ProgramFiles.trim() : '';
+    if (localAppData) {
+      knownCandidates.push(
+        pathTelemetry.join(localAppData, 'agy-switch', binName),
+        pathTelemetry.join(localAppData, 'Programs', 'agy-switch', binName),
+        pathTelemetry.join(localAppData, 'AntiGravity Switch', binName),
+        pathTelemetry.join(localAppData, 'Programs', 'AntiGravity Switch', binName)
+      );
+    }
+    if (programFiles) {
+      knownCandidates.push(
+        pathTelemetry.join(programFiles, 'agy-switch', binName),
+        pathTelemetry.join(programFiles, 'AntiGravity Switch', binName)
+      );
+    }
+    knownCandidates.push(
+      pathTelemetry.join(homeDir, '.gemini', 'tools', 'agy-switch', binName),
+      pathTelemetry.join(homeDir, '.gemini', 'tools', binName)
+    );
+  } else {
+    knownCandidates.push(
+      '/Applications/AntiGravity Switch.app/Contents/MacOS/agy-switch',
+      '/usr/local/bin/agy-switch',
+      '/opt/homebrew/bin/agy-switch',
+      '/usr/bin/agy-switch',
+      pathTelemetry.join(homeDir, '.local', 'bin', 'agy-switch')
+    );
+  }
+  for (const cand of knownCandidates) {
+    if (isValidSwitchCliBinary(cand)) {
+      return pathTelemetry.resolve(cand);
+    }
+  }
+
+  const rawPathEnv = typeof process.env.PATH === 'string' ? process.env.PATH : '';
+  if (rawPathEnv) {
+    const dirs = rawPathEnv.split(pathTelemetry.delimiter).map((d) => d.trim().replace(/^"+|"+$/g, '')).filter(Boolean);
+    for (const dir of dirs) {
+      const cand = pathTelemetry.join(dir, binName);
+      if (isValidSwitchCliBinary(cand)) {
+        return pathTelemetry.resolve(cand);
+      }
+    }
+  }
+  return null;
+}
+
+function parseCliJsonOutput(rawText) {
+  const cleaned = stripBom(String(rawText || '')).trim();
+  if (!cleaned) {
+    return null;
+  }
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function runSwitchCliJson(cliPath, args, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      childProcessTelemetry.execFile(
+        cliPath,
+        args,
+        {
+          timeout: timeoutMs,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+          shell: false,
+        },
+        (err, stdout, stderr) => {
+          const parsedOut = parseCliJsonOutput(stdout);
+          const parsedErr = parseCliJsonOutput(stderr);
+          if (!err && parsedOut && typeof parsedOut === 'object') {
+            resolve({ ok: true, data: parsedOut, error: null });
+            return;
+          }
+          const errMsg = (parsedErr && parsedErr.error && typeof parsedErr.error.message === 'string')
+            ? sanitizeSafeText(parsedErr.error.message, 180)
+            : (parsedOut && parsedOut.error && typeof parsedOut.error.message === 'string')
+              ? sanitizeSafeText(parsedOut.error.message, 180)
+              : (err && err.killed)
+                ? '外部 CLI 执行超时，请稍后重试'
+                : '外部 CLI 返回异常，请检查 agy-switch 状态';
+          resolve({ ok: false, data: null, error: errMsg });
+        }
+      );
+    } catch {
+      resolve({ ok: false, data: null, error: '无法启动外部 CLI 进程' });
+    }
+  });
+}
+
+function normalizePlanBadge(rawTier) {
+  const s = sanitizeSafeText(rawTier, 64);
+  if (!s) {
+    return 'UNKNOWN';
+  }
+  if (/ultra/i.test(s)) return 'ULTRA';
+  if (/pro/i.test(s)) return 'PRO';
+  if (/enterprise|business|pay/i.test(s)) return 'GCP';
+  if (/free|standard/i.test(s)) return 'FREE';
+  return s.length > 12 ? s.slice(0, 12).toUpperCase() : s.toUpperCase();
+}
+
+function extractBucketWindowSummary(buckets, matcherRe) {
+  let chosenPct = null;
+  let chosenReset = '';
+  for (const b of buckets || []) {
+    if (!b || typeof b !== 'object') continue;
+    const win = String(b.window || b.bucket_id || '').toLowerCase();
+    if (!matcherRe.test(win)) continue;
+    if (b.remaining_fraction_known === false) continue;
+    const frac = Number(b.remaining_fraction);
+    if (!Number.isFinite(frac)) continue;
+    const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+    const reset = sanitizeSafeText(b.reset_time, 64);
+    if (chosenPct === null || pct < chosenPct) {
+      chosenPct = pct;
+      chosenReset = reset;
+    }
+  }
+  return { pct: chosenPct, resetTime: chosenReset };
+}
+
+function extractAccountQuotaSummary(rawQuota) {
+  const empty = {
+    fiveHour: { pct: null, resetTime: '' },
+    weekly: { pct: null, resetTime: '' },
+    secondaryLabel: '',
+    secondaryFiveHour: { pct: null, resetTime: '' },
+    secondaryWeekly: { pct: null, resetTime: '' },
+  };
+  if (!rawQuota || typeof rawQuota !== 'object') {
+    return empty;
+  }
+  const groups = Array.isArray(rawQuota.quota_groups) ? rawQuota.quota_groups : [];
+  if (groups.length > 0) {
+    const primaryGroup =
+      groups.find((g) => g && /gemini/i.test(String(g.display_name || '')) && !/argon|carbon/i.test(String(g.display_name || ''))) ||
+      groups.find((g) => g && /gemini/i.test(String(g.display_name || ''))) ||
+      groups[0];
+    const secondaryGroup =
+      groups.find((g) => g && g !== primaryGroup && /claude|gpt|partner|third|\b3p\b/i.test(String(g.display_name || ''))) ||
+      groups.find((g) => g && g !== primaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /^3p[-_]/i.test(String(b.bucket_id || '')))) ||
+      null;
+    const fiveRe = /(?:^|[_-])5h(?:$|[_-])|five.?hour/i;
+    const weekRe = /week/i;
+    const out = {
+      fiveHour: primaryGroup ? extractBucketWindowSummary(primaryGroup.buckets, fiveRe) : { pct: null, resetTime: '' },
+      weekly: primaryGroup ? extractBucketWindowSummary(primaryGroup.buckets, weekRe) : { pct: null, resetTime: '' },
+      secondaryLabel: secondaryGroup ? sanitizeSafeText(secondaryGroup.display_name, 32) : '',
+      secondaryFiveHour: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, fiveRe) : { pct: null, resetTime: '' },
+      secondaryWeekly: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, weekRe) : { pct: null, resetTime: '' },
+    };
+    if (out.fiveHour.pct !== null || out.weekly.pct !== null || out.secondaryFiveHour.pct !== null || out.secondaryWeekly.pct !== null) {
+      return out;
+    }
+  }
+
+  const models = Array.isArray(rawQuota.models) ? rawQuota.models : [];
+  if (models.length > 0) {
+    const geminiModels = models.filter((m) => m && /gemini/i.test(String(m.name || '')) && !/argon|carbon/i.test(String(m.name || '')));
+    const pool = geminiModels.length > 0 ? geminiModels : models;
+    let minPct = null;
+    let reset = '';
+    for (const m of pool) {
+      if (!m || m.percentage_known === false) continue;
+      const pctNum = Number(m.percentage);
+      if (!Number.isFinite(pctNum)) continue;
+      const pct = Math.max(0, Math.min(100, Math.round(pctNum)));
+      if (minPct === null || pct < minPct) {
+        minPct = pct;
+        reset = sanitizeSafeText(m.reset_time, 64);
+      }
+    }
+    return {
+      ...empty,
+      fiveHour: { pct: minPct, resetTime: reset },
+    };
+  }
+  return empty;
+}
+
+function sanitizeAccountView(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  if (!SWITCH_ACCOUNT_ID_RE.test(id)) {
+    return null;
+  }
+  const q = raw.quota && typeof raw.quota === 'object' ? raw.quota : null;
+  return {
+    id,
+    email: sanitizeSafeText(raw.email, 160),
+    name: sanitizeSafeText(raw.name, 80),
+    label: sanitizeSafeText(raw.custom_label, 48),
+    plan: normalizePlanBadge(q && q.subscription_tier),
+    planRaw: sanitizeSafeText(q && q.subscription_tier, 48),
+    isCurrent: Boolean(raw.is_current),
+    disabled: Boolean(raw.disabled),
+    validationBlocked: Boolean(raw.validation_blocked),
+    isForbidden: Boolean(q && q.is_forbidden),
+    lastUsed: Number(raw.last_used) || 0,
+    lastUpdated: Number(q && q.last_updated) || 0,
+    quota: extractAccountQuotaSummary(q),
+  };
+}
+
+async function fetchSanitizedAccountsList(cliPath) {
+  const res = await runSwitchCliJson(cliPath, ['accounts', 'list', '--json'], 6000);
+  if (!res.ok) {
+    return {
+      available: true,
+      accounts: [],
+      currentId: null,
+      currentTarget: null,
+      error: res.error,
+    };
+  }
+  const rawAccounts = Array.isArray(res.data && res.data.accounts) ? res.data.accounts : [];
+  const accounts = [];
+  let currentId = null;
+  for (const item of rawAccounts) {
+    const clean = sanitizeAccountView(item);
+    if (!clean) continue;
+    if (clean.isCurrent && !currentId) {
+      currentId = clean.id;
+    }
+    accounts.push(clean);
+  }
+  return {
+    available: true,
+    accounts,
+    currentId,
+    currentTarget: sanitizeSafeText(res.data && res.data.current_target, 32) || null,
+    error: null,
+  };
+}
+
+electronMain.removeHandler?.('telemetry:accounts-list');
+electronMain.handle('telemetry:accounts-list', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { available: false, reason: 'untrusted_sender', accounts: [], currentId: null, currentTarget: null, error: null };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath) {
+    return { available: false, reason: 'not_installed', accounts: [], currentId: null, currentTarget: null, error: null };
+  }
+  return await fetchSanitizedAccountsList(cliPath);
+});
+
+electronMain.removeHandler?.('telemetry:accounts-refresh');
+electronMain.handle('telemetry:accounts-refresh', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { available: false, refreshed: false, accounts: [], currentId: null, error: '拒绝非本地来源请求' };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath) {
+    return { available: false, refreshed: false, accounts: [], currentId: null, error: '未检测到 agy-switch CLI' };
+  }
+  if (!accountsRefreshInFlight) {
+    accountsRefreshInFlight = (async () => {
+      const refreshRes = await runSwitchCliJson(cliPath, ['refresh', '--json'], 40000);
+      const listRes = await fetchSanitizedAccountsList(cliPath);
+      if (!refreshRes.ok) {
+        return {
+          ...listRes,
+          refreshed: false,
+          refreshSummary: null,
+          error: refreshRes.error || listRes.error,
+        };
+      }
+      return {
+        ...listRes,
+        refreshed: true,
+        refreshSummary: {
+          total: Number(refreshRes.data && refreshRes.data.total) || listRes.accounts.length,
+          success: Number(refreshRes.data && refreshRes.data.success) || 0,
+          failed: Number(refreshRes.data && refreshRes.data.failed) || 0,
+        },
+        error: listRes.error,
+      };
+    })().finally(() => {
+      accountsRefreshInFlight = null;
+    });
+  }
+  return await accountsRefreshInFlight;
+});
+
+electronMain.removeHandler?.('telemetry:accounts-switch');
+electronMain.handle('telemetry:accounts-switch', async (event, accountId) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false, error: '拒绝非本地来源请求' };
+  }
+  const cleanId = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!SWITCH_ACCOUNT_ID_RE.test(cleanId)) {
+    return { ok: false, error: '无效的账号标识' };
+  }
+  if (accountsSwitchInFlight) {
+    return { ok: false, error: '正在执行账号切换，请稍候' };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath) {
+    return { ok: false, error: '未检测到 agy-switch CLI' };
+  }
+  accountsSwitchInFlight = true;
+  let keepCooldown = false;
+  try {
+    const listRes = await fetchSanitizedAccountsList(cliPath);
+    if (listRes.error) {
+      return { ok: false, error: listRes.error };
+    }
+    const target = listRes.accounts.find((a) => a.id === cleanId);
+    if (!target) {
+      return { ok: false, error: '未在 agy-switch 索引中找到该账号' };
+    }
+    if (target.disabled || target.validationBlocked) {
+      return { ok: false, error: '该账号当前已禁用或需要重新验证，无法切换' };
+    }
+    const spawnRes = await new Promise((resolve) => {
+      try {
+        const child = childProcessTelemetry.spawn(
+          cliPath,
+          ['switch', cleanId, '--target', 'app', '--json'],
+          {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+            shell: false,
+          }
+        );
+        let settled = false;
+        child.once('error', () => {
+          if (!settled) {
+            settled = true;
+            resolve({ ok: false, error: '无法拉起 agy-switch 切换进程' });
+          }
+        });
+        child.once('spawn', () => {
+          if (!settled) {
+            settled = true;
+            try { child.unref(); } catch {}
+            resolve({ ok: true, switching: true, accountId: cleanId });
+          }
+        });
+      } catch {
+        resolve({ ok: false, error: '拉起外部切换进程失败' });
+      }
+    });
+    if (spawnRes && spawnRes.ok) {
+      keepCooldown = true;
+    }
+    return spawnRes;
+  } finally {
+    if (keepCooldown) {
+      const cdTimer = setTimeout(() => {
+        accountsSwitchInFlight = false;
+      }, 3000);
+      if (cdTimer && typeof cdTimer.unref === 'function') {
+        cdTimer.unref();
+      }
+    } else {
+      accountsSwitchInFlight = false;
+    }
+  }
+});
 }
 // === TELEMETRY_MOD_IPC_END ===
