@@ -152,6 +152,18 @@ const SAMPLE_LIST_PAYLOAD = {
               },
             ],
           },
+          {
+            display_name: 'Gemini 4 Argon',
+            buckets: [
+              {
+                bucket_id: 'gemini-argon-wtu-weekly',
+                window: 'weekly',
+                remaining_fraction: 0.982,
+                remaining_fraction_known: true,
+                reset_time: '2026-11-25T01:37:15Z',
+              },
+            ],
+          },
         ],
       },
     },
@@ -227,6 +239,8 @@ async function runTests() {
     assert(patchedIpc.includes('telemetry:accounts-list'));
     assert(patchedIpc.includes('telemetry:accounts-refresh'));
     assert(patchedIpc.includes('telemetry:accounts-switch'));
+    assert(patchedIpc.includes('telemetry:accounts-add'));
+    assert(patchedIpc.includes('telemetry:accounts-delete'));
 
     const preloadCombined = [p1, p2, p3].join('\n');
     const patchedPreload = patchAsar.applyPreloadPatch(
@@ -235,6 +249,8 @@ async function runTests() {
     );
     assert(patchedPreload.includes('ta-tab-accounts'));
     assert(patchedPreload.includes('telemetry:accounts-switch'));
+    assert(patchedPreload.includes('telemetry:accounts-add'));
+    assert(patchedPreload.includes('telemetry:accounts-delete'));
   });
 
   await runCase('2. CLI absent degrades gracefully to available=false', async () => {
@@ -292,6 +308,10 @@ async function runTests() {
         assert.strictEqual(r2.refreshed, false);
         const r3 = await handlers.get('telemetry:accounts-switch')(evt, 'acct_backup_02');
         assert.strictEqual(r3.ok, false);
+        const r4 = await handlers.get('telemetry:accounts-add')(evt);
+        assert.strictEqual(r4.ok, false);
+        const r5 = await handlers.get('telemetry:accounts-delete')(evt, 'acct_backup_02');
+        assert.strictEqual(r5.ok, false);
       }
       assert.strictEqual(invoked, false);
     } finally {
@@ -340,6 +360,7 @@ async function runTests() {
       assert.strictEqual(main.quota.weekly.pct, 42);
       assert.strictEqual(main.quota.secondaryFiveHour.pct, 90);
       assert.strictEqual(main.quota.secondaryWeekly.pct, 65);
+      assert.strictEqual(main.quota.argonWeekly.pct, 98);
       // Verify zero credential leakage
       const serialized = JSON.stringify(res);
       assert(!serialized.includes('SECRET_ACCESS'));
@@ -478,10 +499,19 @@ async function runTests() {
     assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
     assert(combined.includes('data-role="ta-acct-pill" hidden'));
     assert(combined.includes('data-role="ta-accounts-section" hidden'));
-    // Verify inline two-step confirmation markup exists (no accidental 1-click restart)
+    // Verify inline two-step confirmation markup exists (no accidental 1-click restart or delete)
+    assert(combined.includes('data-action="acct-add"'));
     assert(combined.includes('data-action="acct-switch"'));
     assert(combined.includes('data-action="acct-confirm"'));
+    assert(combined.includes('data-action="acct-delete"'));
+    assert(combined.includes('data-action="acct-delete-confirm"'));
     assert(combined.includes('data-action="acct-cancel"'));
+    // Verify unified fixed panel geometry anchored to Daily view
+    assert(combined.includes('width: min(860px, 94vw);'));
+    assert(combined.includes('height: min(656px, 90vh);'));
+    assert(combined.includes('scrollbar-gutter: stable;'));
+    assert(combined.includes('data-role="acct-kpi-current-val"'));
+    assert(combined.includes('@media (max-height: 540px)'));
     // Verify renderer never references raw token fields
     assert(!combined.includes('refresh_token'));
     assert(!combined.includes('access_token'));
@@ -500,6 +530,126 @@ async function runTests() {
     assert.strictEqual(helperCtx.getQuotaBarColor(75), 'var(--agy-ta-q-good)');
     assert.strictEqual(helperCtx.getQuotaBarColor(30), 'var(--agy-ta-q-warn)');
     assert.strictEqual(helperCtx.getQuotaBarColor(10), 'var(--agy-ta-q-low)');
+  });
+
+  await runCase('10. accounts-add launches external interactive CLI safely without shell injection', async () => {
+    const tmpHome = createTempDir('agy-tp-add-');
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+    try {
+      const spawns = [];
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
+        execFileImpl: () => { throw new Error('unexpected execFile'); },
+        spawnImpl: (file, args, opts) => {
+          const child = new EventEmitter();
+          let unrefCalled = false;
+          child.unref = () => { unrefCalled = true; };
+          spawns.push({ file, args, opts, getUnref: () => unrefCalled });
+          setImmediate(() => child.emit('spawn'));
+          return child;
+        },
+      });
+
+      const res = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.launched, true);
+      assert.strictEqual(spawns.length, 1);
+      assert.strictEqual(spawns[0].opts.detached, true);
+      assert.strictEqual(spawns[0].opts.shell, false);
+      assert.strictEqual(spawns[0].getUnref(), true);
+      if (process.platform === 'win32') {
+        assert.strictEqual(path.resolve(spawns[0].opts.env.AGY_SWITCH_BIN), path.resolve(fakeCli));
+        assert(Array.from(spawns[0].args).includes('Start-Process -FilePath $env:AGY_SWITCH_BIN'));
+      }
+
+      // Immediate second click hits 2-second cooldown debounce
+      const res2 = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(res2.ok, false);
+      assert.strictEqual(spawns.length, 1);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('11. accounts-delete atomically updates accounts.json, removes file, and blocks bad IDs', async () => {
+    const tmpHome = createTempDir('agy-tp-del-');
+    const dataDir = path.join(tmpHome, '.antigravity_tools');
+    const accountsDir = path.join(dataDir, 'accounts');
+    fs.mkdirSync(accountsDir, { recursive: true });
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy');
+
+    const initialIndex = {
+      version: '2.0',
+      accounts: [
+        { id: 'acct_main_01', email: 'alpha@example.com', name: 'Alpha', disabled: false, created_at: 1, last_used: 2 },
+        { id: 'acct_backup_02', email: 'beta@example.com', name: 'Beta', disabled: false, created_at: 1, last_used: 1 },
+      ],
+      current_account_id: 'acct_main_01',
+      current_target_ide: null,
+      current_ide_account_id: 'acct_main_01',
+      current_vscode_account_id: 'acct_main_01',
+    };
+    const indexPath = path.join(dataDir, 'accounts.json');
+    fs.writeFileSync(indexPath, '\uFEFF' + JSON.stringify(initialIndex, null, 2), 'utf8');
+    const mainFile = path.join(accountsDir, 'acct_main_01.json');
+    const backupFile = path.join(accountsDir, 'acct_backup_02.json');
+    fs.writeFileSync(mainFile, JSON.stringify({ id: 'acct_main_01', email: 'alpha@example.com' }), 'utf8');
+    fs.writeFileSync(backupFile, JSON.stringify({ id: 'acct_backup_02', email: 'beta@example.com' }), 'utf8');
+
+    try {
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, ABV_DATA_DIR: '', PATH: '' },
+        execFileImpl: (_file, _args, _opts, cb) => {
+          const curIdx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+          cb(null, JSON.stringify({
+            schema_version: 1,
+            current_target: null,
+            accounts: curIdx.accounts.map((a) => ({
+              id: a.id,
+              email: a.email,
+              name: a.name,
+              is_current: a.id === curIdx.current_account_id,
+              disabled: false,
+              validation_blocked: false,
+              last_used: a.last_used,
+              quota: null,
+            })),
+          }), '');
+        },
+        spawnImpl: () => { throw new Error('unexpected spawn'); },
+      });
+
+      // Invalid / traversal IDs rejected
+      for (const badId of ['', '../accounts', 'acct_main_01/../../x', 'bad id']) {
+        const badRes = await handlers.get('telemetry:accounts-delete')(TRUSTED_EVENT, badId);
+        assert.strictEqual(badRes.ok, false);
+      }
+      // Missing account ID rejected
+      const missingRes = await handlers.get('telemetry:accounts-delete')(TRUSTED_EVENT, 'acct_does_not_exist');
+      assert.strictEqual(missingRes.ok, false);
+
+      // Delete current account -> promotes next remaining account & clears ide/vscode selections & deletes json file
+      const delRes = await handlers.get('telemetry:accounts-delete')(TRUSTED_EVENT, 'acct_main_01');
+      assert.strictEqual(delRes.ok, true);
+      assert.strictEqual(delRes.deletedId, 'acct_main_01');
+      assert.strictEqual(delRes.accounts.length, 1);
+      assert.strictEqual(delRes.accounts[0].id, 'acct_backup_02');
+      assert.strictEqual(delRes.currentId, 'acct_backup_02');
+
+      const updatedIndex = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      assert.strictEqual(updatedIndex.accounts.length, 1);
+      assert.strictEqual(updatedIndex.current_account_id, 'acct_backup_02');
+      assert.strictEqual(updatedIndex.current_ide_account_id, undefined);
+      assert.strictEqual(updatedIndex.current_vscode_account_id, undefined);
+      assert.strictEqual(fs.existsSync(mainFile), false);
+      assert.strictEqual(fs.existsSync(backupFile), true);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
   });
 
   console.log(`\nAll ${passed} tests passed!`);

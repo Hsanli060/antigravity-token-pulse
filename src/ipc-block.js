@@ -763,6 +763,8 @@ const SWITCH_ACCOUNT_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 const SWITCH_CLI_CONFIG_FILE = 'telemetry-switch-cli.json';
 let accountsRefreshInFlight = null;
 let accountsSwitchInFlight = false;
+let accountsDeleteInFlight = false;
+let accountsAddCooldownUntil = 0;
 
 function isTrustedLocalSender(event) {
   try {
@@ -1002,6 +1004,7 @@ function extractAccountQuotaSummary(rawQuota) {
     secondaryLabel: '',
     secondaryFiveHour: { pct: null, resetTime: '' },
     secondaryWeekly: { pct: null, resetTime: '' },
+    argonWeekly: { pct: null, resetTime: '' },
   };
   if (!rawQuota || typeof rawQuota !== 'object') {
     return empty;
@@ -1016,6 +1019,10 @@ function extractAccountQuotaSummary(rawQuota) {
       groups.find((g) => g && g !== primaryGroup && /claude|gpt|partner|third|\b3p\b/i.test(String(g.display_name || ''))) ||
       groups.find((g) => g && g !== primaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /^3p[-_]/i.test(String(b.bucket_id || '')))) ||
       null;
+    const argonGroup =
+      groups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && /argon/i.test(String(g.display_name || ''))) ||
+      groups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /argon/i.test(String(b.bucket_id || '')))) ||
+      null;
     const fiveRe = /(?:^|[_-])5h(?:$|[_-])|five.?hour/i;
     const weekRe = /week/i;
     const out = {
@@ -1024,8 +1031,9 @@ function extractAccountQuotaSummary(rawQuota) {
       secondaryLabel: secondaryGroup ? sanitizeSafeText(secondaryGroup.display_name, 32) : '',
       secondaryFiveHour: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, fiveRe) : { pct: null, resetTime: '' },
       secondaryWeekly: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, weekRe) : { pct: null, resetTime: '' },
+      argonWeekly: argonGroup ? extractBucketWindowSummary(argonGroup.buckets, weekRe) : { pct: null, resetTime: '' },
     };
-    if (out.fiveHour.pct !== null || out.weekly.pct !== null || out.secondaryFiveHour.pct !== null || out.secondaryWeekly.pct !== null) {
+    if (out.fiveHour.pct !== null || out.weekly.pct !== null || out.secondaryFiveHour.pct !== null || out.secondaryWeekly.pct !== null || out.argonWeekly.pct !== null) {
       return out;
     }
   }
@@ -1237,6 +1245,234 @@ electronMain.handle('telemetry:accounts-switch', async (event, accountId) => {
       accountsSwitchInFlight = false;
     }
   }
+});
+
+function resolveSwitchDataDir(homeDir) {
+  const envDir = typeof process.env.ABV_DATA_DIR === 'string' ? process.env.ABV_DATA_DIR.trim() : '';
+  if (envDir) {
+    return pathTelemetry.resolve(envDir);
+  }
+  return pathTelemetry.join(homeDir, '.antigravity_tools');
+}
+
+function isSwitchLockBusy(dataDir) {
+  try {
+    const lockPath = pathTelemetry.join(dataDir, 'account-switch.lock');
+    if (!fsTelemetry.existsSync(lockPath)) {
+      return false;
+    }
+    const fd = fsTelemetry.openSync(lockPath, 'r+');
+    try {
+      fsTelemetry.closeSync(fd);
+    } catch {}
+    return false;
+  } catch (err) {
+    const code = err && err.code;
+    return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+  }
+}
+
+function findUnixTerminalCommand(cliPath) {
+  if (process.platform === 'darwin') {
+    return { cmd: 'open', args: ['-a', 'Terminal', cliPath] };
+  }
+  const candidates = [
+    { name: 'x-terminal-emulator', args: ['-e', cliPath] },
+    { name: 'gnome-terminal', args: ['--', cliPath] },
+    { name: 'konsole', args: ['-e', cliPath] },
+    { name: 'xfce4-terminal', args: ['-e', cliPath] },
+    { name: 'alacritty', args: ['-e', cliPath] },
+    { name: 'kitty', args: [cliPath] },
+    { name: 'xterm', args: ['-e', cliPath] },
+  ];
+  const rawPathEnv = typeof process.env.PATH === 'string' ? process.env.PATH : '';
+  const dirs = rawPathEnv.split(pathTelemetry.delimiter).map((d) => d.trim()).filter(Boolean);
+  for (const item of candidates) {
+    for (const dir of dirs) {
+      const full = pathTelemetry.join(dir, item.name);
+      try {
+        if (fsTelemetry.statSync(full).isFile()) {
+          return { cmd: full, args: item.args };
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
+function spawnInteractiveSwitchCli(cliPath) {
+  return new Promise((resolve) => {
+    try {
+      let launchCmd = '';
+      let launchArgs = [];
+      let launchEnv = process.env;
+      let hideLauncher = true;
+
+      if (process.platform === 'win32') {
+        const sysRoot = typeof process.env.SystemRoot === 'string' ? process.env.SystemRoot.trim() : '';
+        const psCandidate = sysRoot
+          ? pathTelemetry.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+          : '';
+        launchCmd = psCandidate && fsTelemetry.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
+        launchArgs = [
+          '-NoProfile',
+          '-NonInteractive',
+          '-WindowStyle',
+          'Hidden',
+          '-Command',
+          'Start-Process -FilePath $env:AGY_SWITCH_BIN',
+        ];
+        launchEnv = { ...process.env, AGY_SWITCH_BIN: cliPath };
+        hideLauncher = true;
+      } else {
+        const unixTerm = findUnixTerminalCommand(cliPath);
+        if (!unixTerm) {
+          resolve({ ok: false, error: '未找到可用的系统终端，请手动在终端运行 agy-switch 添加账号' });
+          return;
+        }
+        launchCmd = unixTerm.cmd;
+        launchArgs = unixTerm.args;
+        hideLauncher = false;
+      }
+
+      const child = childProcessTelemetry.spawn(launchCmd, launchArgs, {
+        env: launchEnv,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: hideLauncher,
+        shell: false,
+      });
+      let settled = false;
+      child.once('error', () => {
+        if (!settled) {
+          settled = true;
+          resolve({ ok: false, error: '无法打开外部 agy-switch 终端窗口' });
+        }
+      });
+      child.once('spawn', () => {
+        if (!settled) {
+          settled = true;
+          try { child.unref(); } catch {}
+          resolve({ ok: true, launched: true });
+        }
+      });
+    } catch {
+      resolve({ ok: false, error: '启动外部 agy-switch 窗口失败' });
+    }
+  });
+}
+
+electronMain.removeHandler?.('telemetry:accounts-add');
+electronMain.handle('telemetry:accounts-add', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false, error: '拒绝非本地来源请求' };
+  }
+  const now = Date.now();
+  if (now < accountsAddCooldownUntil) {
+    return { ok: false, error: '已正在打开外部 agy-switch 窗口，请勿重复点击' };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath || !isValidSwitchCliBinary(cliPath)) {
+    return { ok: false, error: '未检测到 agy-switch CLI' };
+  }
+  accountsAddCooldownUntil = now + 2000;
+  const res = await spawnInteractiveSwitchCli(cliPath);
+  if (!res || !res.ok) {
+    accountsAddCooldownUntil = 0;
+  }
+  return res;
+});
+
+electronMain.removeHandler?.('telemetry:accounts-delete');
+electronMain.handle('telemetry:accounts-delete', async (event, accountId) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false, error: '拒绝非本地来源请求' };
+  }
+  const cleanId = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!SWITCH_ACCOUNT_ID_RE.test(cleanId)) {
+    return { ok: false, error: '无效的账号标识' };
+  }
+  if (accountsSwitchInFlight) {
+    return { ok: false, error: '正在执行账号切换，请稍后再删除' };
+  }
+  if (accountsDeleteInFlight) {
+    return { ok: false, error: '正在删除其他账号，请稍候' };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath) {
+    return { ok: false, error: '未检测到 agy-switch CLI' };
+  }
+  const homeDir = osTelemetry.homedir();
+  const dataDir = resolveSwitchDataDir(homeDir);
+  if (isSwitchLockBusy(dataDir)) {
+    return { ok: false, error: '检测到 agy-switch 正在执行切换，请稍后再删除' };
+  }
+  accountsDeleteInFlight = true;
+  const lockPath = pathTelemetry.join(dataDir, 'accounts.json.telemetry.lock');
+  let hasLock = false;
+  try {
+    const indexPath = pathTelemetry.join(dataDir, 'accounts.json');
+    if (!fsTelemetry.existsSync(indexPath)) {
+      return { ok: false, error: '未找到本地账号索引文件 (accounts.json)' };
+    }
+    hasLock = await acquireFileLockAsync(lockPath, 1200);
+    if (!hasLock) {
+      return { ok: false, error: '账号索引文件正忙，请稍后重试' };
+    }
+    const rawText = stripBom(await fsTelemetry.promises.readFile(indexPath, 'utf-8')).replace(/^\u0000+/, '');
+    let indexData;
+    try {
+      indexData = JSON.parse(rawText);
+    } catch {
+      return { ok: false, error: '本地账号索引格式异常，请先在外部 agy-switch 检查' };
+    }
+    if (!indexData || typeof indexData !== 'object' || !Array.isArray(indexData.accounts)) {
+      return { ok: false, error: '本地账号索引结构无效' };
+    }
+    const origLen = indexData.accounts.length;
+    indexData.accounts = indexData.accounts.filter((entry) => entry && entry.id !== cleanId);
+    if (indexData.accounts.length === origLen) {
+      return { ok: false, error: '未在本地账号索引中找到该账号' };
+    }
+    if (indexData.current_ide_account_id === cleanId) {
+      delete indexData.current_ide_account_id;
+    }
+    if (indexData.current_vscode_account_id === cleanId) {
+      delete indexData.current_vscode_account_id;
+    }
+    if (indexData.current_account_id === cleanId) {
+      indexData.current_account_id = indexData.accounts.length > 0 ? indexData.accounts[0].id : null;
+    }
+    await atomicWriteFileAsync(indexPath, JSON.stringify(indexData, null, 2));
+
+    const accountsDir = pathTelemetry.resolve(dataDir, 'accounts');
+    const accountFile = pathTelemetry.resolve(accountsDir, `${cleanId}.json`);
+    if (pathTelemetry.dirname(accountFile) === accountsDir) {
+      try {
+        const st = fsTelemetry.lstatSync(accountFile);
+        if (st.isFile() && !st.isSymbolicLink()) {
+          fsTelemetry.unlinkSync(accountFile);
+        }
+      } catch (err) {
+        if (!err || err.code !== 'ENOENT') {
+          throw err;
+        }
+      }
+    }
+  } catch {
+    return { ok: false, error: '删除本地账号记录失败，请检查文件权限' };
+  } finally {
+    if (hasLock) {
+      releaseFileLockSync(lockPath);
+    }
+    accountsDeleteInFlight = false;
+  }
+  const listRes = await fetchSanitizedAccountsList(cliPath);
+  return {
+    ok: true,
+    deletedId: cleanId,
+    ...listRes,
+  };
 });
 }
 // === TELEMETRY_MOD_IPC_END ===
