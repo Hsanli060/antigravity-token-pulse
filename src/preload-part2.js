@@ -664,23 +664,130 @@ return `${hours}h${mins > 0 ? `${mins}m` : ''}`;
 }
 return `${mins}m`;
 }
-function renderQuotaBarHtml(label, bucket, shortLabel) {
+const ACCT_RING_CIRCUMFERENCE = 76.6549; // 2 * Math.PI * 12.2
+function formatQuotaRingOffset(pct) {
+if (pct === null || pct === undefined || !Number.isFinite(Number(pct))) {
+return ACCT_RING_CIRCUMFERENCE.toFixed(2);
+}
+const clamped = Math.max(0, Math.min(100, Number(pct)));
+return (ACCT_RING_CIRCUMFERENCE * (1 - clamped / 100)).toFixed(2);
+}
+function resolveDynamicQuotaGroups(q) {
+if (!q || typeof q !== 'object') {
+return [];
+}
+if (Array.isArray(q.groups) && q.groups.length > 0) {
+return q.groups.filter((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0);
+}
+const fallback = [];
+const addFallbackGroup = (name, shortName, bShort, bLong) => {
+const buckets = [];
+if (bShort && typeof bShort.pct === 'number' && Number.isFinite(bShort.pct)) {
+buckets.push({ window: '5h', label: '5h', pct: Math.max(0, Math.min(100, Math.round(bShort.pct))), resetTime: bShort.resetTime || '' });
+}
+if (bLong && typeof bLong.pct === 'number' && Number.isFinite(bLong.pct)) {
+buckets.push({ window: 'weekly', label: '周', pct: Math.max(0, Math.min(100, Math.round(bLong.pct))), resetTime: bLong.resetTime || '' });
+}
+if (buckets.length > 0) {
+fallback.push({ name, shortName, buckets });
+}
+};
+addFallbackGroup('Gemini Models', 'Gemini', q.fiveHour, q.weekly);
+addFallbackGroup(q.secondaryLabel || 'Claude / GPT', q.secondaryLabel ? (q.secondaryLabel.replace(/\s+models?$/i, '') || 'Claude / GPT') : 'Claude / GPT', q.secondaryFiveHour, q.secondaryWeekly);
+addFallbackGroup('Gemini 4 Argon', 'Argon', null, q.argonWeekly);
+return fallback;
+}
+function renderQuotaRingHtml(groupName, bucket, prevPct) {
 const pct = bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null;
+const winLabel = (bucket && bucket.label) ? String(bucket.label) : '长周期';
 const resetFull = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
 const resetShort = bucket && bucket.resetTime ? formatResetCountdownCompact(bucket.resetTime) : '';
-const pctTxt = pct !== null ? `${pct}%` : '—';
-const fullTip = `${label}：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
-const widthPct = pct !== null ? pct : 0;
-const fillColor = getQuotaBarColor(pct);
-const dispLbl = shortLabel || label;
+const fullTip = `${groupName} ${winLabel}额度：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
+const strokeColor = getQuotaBarColor(pct);
+const targetOffset = formatQuotaRingOffset(pct);
+const shouldAnimate = pct !== null && (prevPct === undefined || prevPct !== pct);
+const initialOffset = shouldAnimate ? formatQuotaRingOffset(prevPct !== undefined ? prevPct : 0) : targetOffset;
+const isZero = pct === 0;
+const valTxt = pct !== null ? String(pct) : '—';
+const valCls = `agy-ta-ring-val${valTxt.length >= 3 ? ' is-three-digit' : ''}${isZero ? ' is-depleted' : ''}`;
+const depletedResetHtml = (isZero && resetShort)
+? `<span class="agy-ta-ring-depleted-reset" title="${escHtml(resetFull || resetShort)}">${escHtml(resetShort)}</span>`
+: '';
 return `
-<div class="agy-ta-qbar" title="${escHtml(fullTip)}">
-<span class="agy-ta-qbar-lbl">${escHtml(dispLbl)}</span>
-<div class="agy-ta-qbar-track"><div class="agy-ta-qbar-fill" style="width:${widthPct}%; background:${fillColor};"></div></div>
-<span class="agy-ta-qbar-val">${escHtml(pctTxt)}</span>
-<span class="agy-ta-qbar-reset">${escHtml(resetShort || '—')}</span>
+<div class="agy-ta-ring-wrap" title="${escHtml(fullTip)}">
+<svg class="agy-ta-ring-svg" viewBox="0 0 30 30" aria-hidden="true">
+<circle class="agy-ta-ring-bg" cx="15" cy="15" r="12.2"></circle>
+<circle class="agy-ta-ring-arc" cx="15" cy="15" r="12.2" transform="rotate(-90 15 15)" stroke="${strokeColor}" stroke-dasharray="${ACCT_RING_CIRCUMFERENCE.toFixed(2)}" stroke-dashoffset="${initialOffset}"${isZero ? ' stroke-opacity="0"' : ''}${shouldAnimate ? ` data-target-offset="${targetOffset}"` : ''}></circle>
+</svg>
+<span class="${valCls}">${escHtml(valTxt)}</span>
+</div>
+${depletedResetHtml}
+`;
+}
+function renderPoolRowHtml(acctId, group, idx, ringPrevMap, ringNextMap) {
+const buckets = Array.isArray(group && group.buckets) ? group.buckets : [];
+if (buckets.length === 0) {
+return '';
+}
+const fullName = String((group && group.name) || (group && group.shortName) || '模型池');
+const shortName = String((group && group.shortName) || fullName);
+const primary = buckets[0];
+const secondary = buckets.length > 1 ? buckets[buckets.length - 1] : null;
+const pct = primary && typeof primary.pct === 'number' && Number.isFinite(primary.pct) ? Math.max(0, Math.min(100, Math.round(primary.pct))) : null;
+const winLabel = (primary && primary.label) ? String(primary.label) : '额度';
+const resetFull = primary && primary.resetTime ? formatResetCountdown(primary.resetTime) : '';
+const resetShort = primary && primary.resetTime ? formatResetCountdownCompact(primary.resetTime) : '';
+const isDepleted = pct === 0;
+const showReset = Boolean(resetShort && pct !== null && pct < 100);
+const barTip = `${fullName} (${winLabel})：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
+const fillColor = getQuotaBarColor(pct);
+const widthPct = pct !== null ? pct : 0;
+const resetHtml = showReset
+? `<span class="agy-ta-pool-reset${isDepleted ? ' is-depleted' : ''}">· ${escHtml(resetShort)}</span>`
+: '';
+let rightHtml = '';
+if (secondary) {
+const ringKey = `${acctId}:${idx}:${secondary.window || secondary.label || 'long'}`;
+const prevPct = ringPrevMap && typeof ringPrevMap.get === 'function' ? ringPrevMap.get(ringKey) : undefined;
+if (ringNextMap && typeof ringNextMap.set === 'function' && typeof secondary.pct === 'number' && Number.isFinite(secondary.pct)) {
+ringNextMap.set(ringKey, Math.max(0, Math.min(100, Math.round(secondary.pct))));
+}
+rightHtml = renderQuotaRingHtml(fullName, secondary, prevPct);
+}
+else {
+const onlyTag = `仅${winLabel}`;
+rightHtml = `<span class="agy-ta-pool-only-tag" title="${escHtml(`${fullName}仅包含${winLabel}周期限额`)}">${escHtml(onlyTag)}</span>`;
+}
+return `
+<div class="agy-ta-pool-row">
+<div class="agy-ta-pool-left" title="${escHtml(barTip)}">
+<div class="agy-ta-pool-head">
+<span class="agy-ta-pool-meta">
+<span class="agy-ta-pool-name">${escHtml(shortName)}</span>
+<span class="agy-ta-pool-win">${escHtml(winLabel)}</span>
+${resetHtml}
+</span>
+<span class="agy-ta-pool-pct${isDepleted ? ' is-depleted' : ''}">${escHtml(pct !== null ? `${pct}%` : '—')}</span>
+</div>
+<div class="agy-ta-pool-track"><div class="agy-ta-pool-fill" style="width:${widthPct}%; background:${fillColor};"></div></div>
+</div>
+<div class="agy-ta-pool-right">${rightHtml}</div>
 </div>
 `;
+}
+function renderQuotaBarHtml(label, bucket, shortLabel) {
+const winLabel = shortLabel || label;
+const fakeGroup = {
+name: label,
+shortName: winLabel,
+buckets: [{
+window: winLabel,
+label: winLabel,
+pct: bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null,
+resetTime: bucket && bucket.resetTime ? bucket.resetTime : '',
+}],
+};
+return renderPoolRowHtml('preview', fakeGroup, 0, null, null);
 }
 function syncAccountsChromeAndVisibility() {
 if (!activityOverlayEl) {
@@ -801,8 +908,17 @@ let best5h = null;
 let bestWeek = null;
 for (const a of readyAccts) {
 const q = a && a.quota ? a.quota : null;
-const p5 = q && q.fiveHour && typeof q.fiveHour.pct === 'number' && Number.isFinite(q.fiveHour.pct) ? Math.round(q.fiveHour.pct) : null;
-const pw = q && q.weekly && typeof q.weekly.pct === 'number' && Number.isFinite(q.weekly.pct) ? Math.round(q.weekly.pct) : null;
+const dynGroups = resolveDynamicQuotaGroups(q);
+const firstGrp = dynGroups[0] || null;
+const firstBuckets = firstGrp && Array.isArray(firstGrp.buckets) ? firstGrp.buckets : [];
+const dynShort = firstBuckets.length > 0 ? firstBuckets[0] : null;
+const dynLong = firstBuckets.length > 1 ? firstBuckets[firstBuckets.length - 1] : null;
+const p5 = (q && q.fiveHour && typeof q.fiveHour.pct === 'number' && Number.isFinite(q.fiveHour.pct))
+? Math.round(q.fiveHour.pct)
+: (dynShort && typeof dynShort.pct === 'number' ? Math.round(dynShort.pct) : null);
+const pw = (q && q.weekly && typeof q.weekly.pct === 'number' && Number.isFinite(q.weekly.pct))
+? Math.round(q.weekly.pct)
+: (dynLong && typeof dynLong.pct === 'number' ? Math.round(dynLong.pct) : null);
 const who = a.label || a.email || a.name || a.id;
 if (p5 !== null && (!best5h || p5 > best5h.pct)) {
 best5h = { pct: p5, who };
@@ -811,8 +927,8 @@ if (pw !== null && (!bestWeek || pw > bestWeek.pct)) {
 bestWeek = { pct: pw, who };
 }
 }
-setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--', best5h ? `最高可用 Gemini 5h：${best5h.who} (${best5h.pct}%)` : '点击刷新额度获取');
-setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--', bestWeek ? `最高可用 Gemini 周额度：${bestWeek.who} (${bestWeek.pct}%)` : '点击刷新额度获取');
+setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--', best5h ? `最高可用短周期额度：${best5h.who} (${best5h.pct}%)` : '点击刷新额度获取');
+setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--', bestWeek ? `最高可用长周期额度：${bestWeek.who} (${bestWeek.pct}%)` : '点击刷新额度获取');
 
 const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
 const addBtn = activityOverlayEl.querySelector('[data-action="acct-add"]');
@@ -914,6 +1030,7 @@ listEl.innerHTML = `
 `;
 return;
 }
+const nextRingPctMap = new Map();
 listEl.innerHTML = accountsList.map((acct) => {
 const isCurrent = Boolean(acct.isCurrent || (accountsCurrentId && acct.id === accountsCurrentId));
 const isUnavailable = Boolean(acct.disabled || acct.validationBlocked);
@@ -922,6 +1039,7 @@ const isDeletingThis = accountsDeletingId === acct.id;
 const isConfirmSwitch = !isCurrent && !isUnavailable && !anyBusy && accountsPendingConfirmId === acct.id && accountsPendingConfirmType === 'switch';
 const isConfirmDelete = !anyBusy && accountsPendingConfirmId === acct.id && accountsPendingConfirmType === 'delete';
 const titleEmail = acct.email || acct.name || acct.id;
+const activeDotHtml = isCurrent ? `<span class="agy-ta-acct-active-dot" title="当前登录账号"></span>` : '';
 const planBadge = acct.plan && acct.plan !== 'UNKNOWN'
 ? `<span class="agy-ta-tag" title="${escHtml(acct.planRaw || acct.plan)}">${escHtml(acct.plan)}</span>`
 : '';
@@ -929,10 +1047,9 @@ const labelBadge = acct.label
 ? `<span class="agy-ta-acct-label agy-ta-ellipsis" title="${escHtml(acct.label)}">${escHtml(acct.label)}</span>`
 : '';
 const statusTags = [
-isCurrent ? `<span class="agy-ta-tag">当前使用</span>` : '',
 acct.disabled ? `<span class="agy-ta-tag agy-ta-acct-tag-danger">已禁用</span>` : '',
 acct.validationBlocked ? `<span class="agy-ta-tag agy-ta-acct-tag-warn">需验证</span>` : '',
-acct.isForbidden ? `<span class="agy-ta-tag agy-ta-acct-tag-danger">配额受限</span>` : '',
+acct.isForbidden ? `<span class="agy-ta-tag agy-ta-acct-tag-danger">受限</span>` : '',
 ].filter(Boolean).join('');
 const deleteTriggerHtml = `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-ghost-danger" data-action="acct-delete" data-account-id="${escHtml(acct.id)}" title="从 agy-switch 本地列表中移除该账号"${anyBusy ? ' disabled' : ''}>删除</button>`;
 let actionHtml = '';
@@ -944,14 +1061,14 @@ actionHtml = `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-dange
 }
 else if (isConfirmSwitch) {
 actionHtml = `
-<span class="agy-ta-acct-confirm-hint">将重启?</span>
+<span class="agy-ta-acct-confirm-hint">重启?</span>
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-confirm" data-account-id="${escHtml(acct.id)}">确认</button>
 <button type="button" class="agy-ta-acct-btn" data-action="acct-cancel">取消</button>
 `;
 }
 else if (isConfirmDelete) {
 actionHtml = `
-<span class="agy-ta-acct-confirm-hint">${isCurrent ? '移除当前?' : '移除记录?'}</span>
+<span class="agy-ta-acct-confirm-hint">${isCurrent ? '移除当前?' : '移除?'}</span>
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-delete-confirm" data-account-id="${escHtml(acct.id)}">确认</button>
 <button type="button" class="agy-ta-acct-btn" data-action="acct-cancel">取消</button>
 `;
@@ -960,49 +1077,55 @@ else if (isCurrent) {
 actionHtml = `<span class="agy-ta-acct-state-lbl">当前</span>${deleteTriggerHtml}`;
 }
 else if (isUnavailable) {
-actionHtml = `<span class="agy-ta-acct-state-lbl">不可用</span>${deleteTriggerHtml}`;
+actionHtml = `<span class="agy-ta-acct-state-lbl is-muted">不可用</span>${deleteTriggerHtml}`;
 }
 else {
 actionHtml = `<button type="button" class="agy-ta-acct-btn" data-action="acct-switch" data-account-id="${escHtml(acct.id)}"${anyBusy ? ' disabled' : ''}>切换</button>${deleteTriggerHtml}`;
 }
-const q = acct.quota || {};
-const fiveBar = renderQuotaBarHtml('Gemini 5h 额度', q.fiveHour, '5h');
-const weekBar = renderQuotaBarHtml('Gemini 周额度', q.weekly, '周');
-const miniChips = [];
-const sec5 = q.secondaryFiveHour && typeof q.secondaryFiveHour.pct === 'number' ? `${q.secondaryFiveHour.pct}%` : null;
-const secW = q.secondaryWeekly && typeof q.secondaryWeekly.pct === 'number' ? `${q.secondaryWeekly.pct}%` : null;
-const argonW = q.argonWeekly && typeof q.argonWeekly.pct === 'number' ? `${q.argonWeekly.pct}%` : null;
-if (sec5 !== null || secW !== null) {
-const secName = q.secondaryLabel || 'Claude / GPT';
-const secTip = `${secName}：5h ${sec5 !== null ? sec5 : '未知'} · 周 ${secW !== null ? secW : '未知'}`;
-miniChips.push(`<span class="agy-ta-acct-mini-chip" title="${escHtml(secTip)}">3P <b>${escHtml(sec5 !== null ? sec5 : '—')}</b>/${escHtml(secW !== null ? secW : '—')}</span>`);
-}
-if (argonW !== null) {
-const argonReset = q.argonWeekly && q.argonWeekly.resetTime ? ` · ${formatResetCountdown(q.argonWeekly.resetTime)}` : '';
-miniChips.push(`<span class="agy-ta-acct-mini-chip" title="${escHtml(`Gemini 4 Argon 周额度：${argonW}${argonReset}`)}">Argon <b>${escHtml(argonW)}</b></span>`);
-}
-const miniPoolsHtml = (!isConfirmSwitch && !isConfirmDelete && miniChips.length > 0)
-? `<div class="agy-ta-acct-mini-pools">${miniChips.join('')}</div>`
-: '';
+const dynGroups = resolveDynamicQuotaGroups(acct.quota);
+const poolsHtml = dynGroups.length > 0
+? dynGroups.map((grp, idx) => renderPoolRowHtml(acct.id, grp, idx, accountsRingRenderedPct, nextRingPctMap)).join('')
+: `<div class="agy-ta-acct-no-quota">${acct.isForbidden ? '当前账号配额接口受限' : '暂无配额缓存，点击上方「刷新额度」获取'}</div>`;
 return `
 <div class="agy-ta-row agy-ta-acct-row${isCurrent ? ' is-active' : ''}${isUnavailable ? ' is-disabled' : ''}">
 <div class="agy-ta-acct-top">
 <div class="agy-ta-acct-identity">
+${activeDotHtml}
 <span class="agy-ta-acct-email agy-ta-ellipsis" title="${escHtml(titleEmail)}">${escHtml(titleEmail)}</span>
 ${labelBadge}
 ${planBadge}
 ${statusTags}
 </div>
-${miniPoolsHtml}
 <div class="agy-ta-acct-actions">${actionHtml}</div>
 </div>
-<div class="agy-ta-acct-quotas">
-${fiveBar}
-${weekBar}
+<div class="agy-ta-acct-pools">
+${poolsHtml}
 </div>
 </div>
 `;
 }).join('');
+accountsRingRenderedPct.clear();
+for (const [k, v] of nextRingPctMap.entries()) {
+accountsRingRenderedPct.set(k, v);
+}
+const pendingRings = listEl.querySelectorAll('.agy-ta-ring-arc[data-target-offset]');
+if (pendingRings.length > 0) {
+const applyRings = () => {
+for (const arc of pendingRings) {
+const targetOff = arc.getAttribute('data-target-offset');
+if (targetOff !== null) {
+arc.setAttribute('stroke-dashoffset', targetOff);
+arc.removeAttribute('data-target-offset');
+}
+}
+};
+if (typeof g.requestAnimationFrame === 'function') {
+g.requestAnimationFrame(() => g.requestAnimationFrame(applyRings));
+}
+else {
+setTimeout(applyRings, 16);
+}
+}
 listEl.scrollTop = prevScroll;
 }
 async function refreshAccountsList(forceRemote, opts) {
@@ -1511,6 +1634,7 @@ accountsDeletingId = null;
 accountsRefreshing = false;
 accountsSyncing = false;
 accountsAutoSyncedOnce = false;
+accountsRingRenderedPct.clear();
 accountsErrorMsg = '';
 accountsStatusMsg = '';
 stopAccountAddFlow(true);
@@ -1670,15 +1794,16 @@ overlay.innerHTML = `
 <span class="agy-ta-acct-sum-sep"></span>
 <span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">账号</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-count-val">0</span></span>
 <span class="agy-ta-acct-sum-sep"></span>
-<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">最高 5h</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-5h-val">--</span></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">短周期最高</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-5h-val">--</span></span>
 <span class="agy-ta-acct-sum-sep"></span>
-<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">最高周</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-week-val">--</span></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">长周期最高</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-week-val">--</span></span>
 </div>
 <div class="agy-ta-acct-panel">
 <div class="agy-ta-section-head">
 <div class="agy-ta-acct-head-left">
 <span class="agy-ta-section-title">账号列表与配额</span>
 <span class="agy-ta-acct-meta" data-role="ta-acct-meta"></span>
+<span class="agy-ta-acct-legend" title="左侧进度条为短周期额度，右侧动态圆环为长周期额度（单周期池直接以进度条展示）">条=短周期 · 环=长周期</span>
 </div>
 <div class="agy-ta-acct-head-actions">
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add">+ 添加账号</button>

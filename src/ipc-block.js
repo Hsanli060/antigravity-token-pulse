@@ -999,6 +999,111 @@ function extractBucketWindowSummary(buckets, matcherRe) {
   return { pct: chosenPct, resetTime: chosenReset };
 }
 
+function parseQuotaWindowMeta(rawWindow, rawBucketId) {
+  const candidates = [
+    String(rawWindow || '').trim().toLowerCase(),
+    String(rawBucketId || '').trim().toLowerCase(),
+  ].filter(Boolean);
+  for (const s of candidates) {
+    let m = s.match(/(?:^|[_-\s])(\d+)\s*m(?:in(?:ute)?s?)?(?:$|[_-\s])/);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > 0) return { key: `${n}m`, label: `${n}m`, order: n };
+    }
+    if (/five.?hour/.test(s)) {
+      return { key: '5h', label: '5h', order: 300 };
+    }
+    m = s.match(/(?:^|[_-\s])(\d+)\s*h(?:(?:ou)?rs?)?(?:$|[_-\s])/);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > 0) return { key: `${n}h`, label: `${n}h`, order: n * 60 };
+    }
+    if (/daily|per.?day/.test(s)) {
+      return { key: 'daily', label: '日', order: 1440 };
+    }
+    m = s.match(/(?:^|[_-\s])(\d+)\s*d(?:ays?)?(?:$|[_-\s])/);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > 0) return { key: `${n}d`, label: n === 1 ? '日' : `${n}天`, order: n * 1440 };
+    }
+    if (/week/.test(s)) {
+      return { key: 'weekly', label: '周', order: 10080 };
+    }
+    if (/month/.test(s)) {
+      return { key: 'monthly', label: '月', order: 43200 };
+    }
+  }
+  const fallback = sanitizeSafeText(rawWindow, 12);
+  return { key: fallback ? fallback.toLowerCase() : 'default', label: fallback || '额度', order: 99999 };
+}
+
+function formatQuotaGroupShortName(rawName, buckets) {
+  const clean = sanitizeSafeText(rawName, 48);
+  if (clean) {
+    if (/^claude\s+and\s+gpt(?:\s+models?)?$/i.test(clean)) return 'Claude / GPT';
+    const stripped = clean.replace(/\s+models?$/i, '').trim();
+    const codenameMatch = stripped.match(/^gemini\s+\d+(?:\.\d+)?\s+([a-z][a-z0-9-]*)$/i);
+    if (codenameMatch) return codenameMatch[1];
+    return stripped.length > 18 ? stripped.slice(0, 18) : stripped;
+  }
+  const firstId = Array.isArray(buckets) && buckets[0] ? String(buckets[0].bucket_id || '') : '';
+  if (/^3p[-_]/i.test(firstId)) return 'Claude / GPT';
+  if (/argon/i.test(firstId)) return 'Argon';
+  if (/gemini/i.test(firstId)) return 'Gemini';
+  return '模型池';
+}
+
+function sanitizeDynamicQuotaGroups(rawGroups) {
+  const result = [];
+  for (const g of rawGroups || []) {
+    if (!g || typeof g !== 'object') continue;
+    const rawBuckets = Array.isArray(g.buckets) ? g.buckets : [];
+    const byWindow = new Map();
+    for (const b of rawBuckets) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.remaining_fraction_known === false) continue;
+      const frac = Number(b.remaining_fraction);
+      if (!Number.isFinite(frac)) continue;
+      const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+      const resetTime = sanitizeSafeText(b.reset_time, 64);
+      const meta = parseQuotaWindowMeta(b.window, b.bucket_id);
+      const existing = byWindow.get(meta.key);
+      if (!existing || pct < existing.pct) {
+        byWindow.set(meta.key, {
+          window: meta.key,
+          label: meta.label,
+          order: meta.order,
+          pct,
+          resetTime,
+        });
+      }
+    }
+    const buckets = Array.from(byWindow.values())
+      .sort((a, b) => a.order - b.order)
+      .map(({ window, label, pct, resetTime }) => ({ window, label, pct, resetTime }));
+    if (buckets.length === 0) continue;
+    const name = sanitizeSafeText(g.display_name, 48) || formatQuotaGroupShortName('', rawBuckets);
+    result.push({
+      name,
+      shortName: formatQuotaGroupShortName(g.display_name, rawBuckets),
+      buckets,
+    });
+  }
+  return result;
+}
+
+function inferWindowLabelFromResetTime(resetTime) {
+  if (!resetTime) return '额度';
+  const ts = Date.parse(resetTime);
+  if (!Number.isFinite(ts)) return '额度';
+  const diffHours = (ts - Date.now()) / 3600000;
+  if (diffHours <= 0) return '额度';
+  if (diffHours <= 6.5) return '5h';
+  if (diffHours <= 26) return '日';
+  if (diffHours <= 180) return '周';
+  return '月';
+}
+
 function extractAccountQuotaSummary(rawQuota) {
   const empty = {
     fiveHour: { pct: null, resetTime: '' },
@@ -1007,23 +1112,25 @@ function extractAccountQuotaSummary(rawQuota) {
     secondaryFiveHour: { pct: null, resetTime: '' },
     secondaryWeekly: { pct: null, resetTime: '' },
     argonWeekly: { pct: null, resetTime: '' },
+    groups: [],
   };
   if (!rawQuota || typeof rawQuota !== 'object') {
     return empty;
   }
-  const groups = Array.isArray(rawQuota.quota_groups) ? rawQuota.quota_groups : [];
-  if (groups.length > 0) {
+  const rawGroups = Array.isArray(rawQuota.quota_groups) ? rawQuota.quota_groups : [];
+  if (rawGroups.length > 0) {
+    const dynamicGroups = sanitizeDynamicQuotaGroups(rawGroups);
     const primaryGroup =
-      groups.find((g) => g && /gemini/i.test(String(g.display_name || '')) && !/argon|carbon/i.test(String(g.display_name || ''))) ||
-      groups.find((g) => g && /gemini/i.test(String(g.display_name || ''))) ||
-      groups[0];
+      rawGroups.find((g) => g && /gemini/i.test(String(g.display_name || '')) && !/argon|carbon/i.test(String(g.display_name || ''))) ||
+      rawGroups.find((g) => g && /gemini/i.test(String(g.display_name || ''))) ||
+      rawGroups[0];
     const secondaryGroup =
-      groups.find((g) => g && g !== primaryGroup && /claude|gpt|partner|third|\b3p\b/i.test(String(g.display_name || ''))) ||
-      groups.find((g) => g && g !== primaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /^3p[-_]/i.test(String(b.bucket_id || '')))) ||
+      rawGroups.find((g) => g && g !== primaryGroup && /claude|gpt|partner|third|\b3p\b/i.test(String(g.display_name || ''))) ||
+      rawGroups.find((g) => g && g !== primaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /^3p[-_]/i.test(String(b.bucket_id || '')))) ||
       null;
     const argonGroup =
-      groups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && /argon/i.test(String(g.display_name || ''))) ||
-      groups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /argon/i.test(String(b.bucket_id || '')))) ||
+      rawGroups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && /argon/i.test(String(g.display_name || ''))) ||
+      rawGroups.find((g) => g && g !== primaryGroup && g !== secondaryGroup && Array.isArray(g.buckets) && g.buckets.some((b) => b && /argon/i.test(String(b.bucket_id || '')))) ||
       null;
     const fiveRe = /(?:^|[_-])5h(?:$|[_-])|five.?hour/i;
     const weekRe = /week/i;
@@ -1034,31 +1141,66 @@ function extractAccountQuotaSummary(rawQuota) {
       secondaryFiveHour: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, fiveRe) : { pct: null, resetTime: '' },
       secondaryWeekly: secondaryGroup ? extractBucketWindowSummary(secondaryGroup.buckets, weekRe) : { pct: null, resetTime: '' },
       argonWeekly: argonGroup ? extractBucketWindowSummary(argonGroup.buckets, weekRe) : { pct: null, resetTime: '' },
+      groups: dynamicGroups,
     };
-    if (out.fiveHour.pct !== null || out.weekly.pct !== null || out.secondaryFiveHour.pct !== null || out.secondaryWeekly.pct !== null || out.argonWeekly.pct !== null) {
+    if (
+      dynamicGroups.length > 0 ||
+      out.fiveHour.pct !== null ||
+      out.weekly.pct !== null ||
+      out.secondaryFiveHour.pct !== null ||
+      out.secondaryWeekly.pct !== null ||
+      out.argonWeekly.pct !== null
+    ) {
       return out;
     }
   }
 
   const models = Array.isArray(rawQuota.models) ? rawQuota.models : [];
   if (models.length > 0) {
-    const geminiModels = models.filter((m) => m && /gemini/i.test(String(m.name || '')) && !/argon|carbon/i.test(String(m.name || '')));
-    const pool = geminiModels.length > 0 ? geminiModels : models;
-    let minPct = null;
-    let reset = '';
-    for (const m of pool) {
+    const familyMap = new Map();
+    for (const m of models) {
       if (!m || m.percentage_known === false) continue;
       const pctNum = Number(m.percentage);
       if (!Number.isFinite(pctNum)) continue;
       const pct = Math.max(0, Math.min(100, Math.round(pctNum)));
-      if (minPct === null || pct < minPct) {
-        minPct = pct;
-        reset = sanitizeSafeText(m.reset_time, 64);
+      const reset = sanitizeSafeText(m.reset_time, 64);
+      const rawName = String(m.name || '').trim();
+      let famKey = 'other';
+      let famLabel = '模型池';
+      if (/argon/i.test(rawName)) {
+        famKey = 'argon';
+        famLabel = 'Argon';
+      } else if (/gemini/i.test(rawName)) {
+        famKey = 'gemini';
+        famLabel = 'Gemini';
+      } else if (/claude|gpt/i.test(rawName)) {
+        famKey = '3p';
+        famLabel = 'Claude / GPT';
+      } else if (/image|imagen/i.test(rawName)) {
+        famKey = 'image';
+        famLabel = 'Imagen';
+      } else if (rawName) {
+        famKey = rawName.split(/[-_/]/)[0].toLowerCase();
+        famLabel = famKey.slice(0, 1).toUpperCase() + famKey.slice(1, 14);
+      }
+      const prev = familyMap.get(famKey);
+      if (!prev || pct < prev.pct) {
+        familyMap.set(famKey, { name: famLabel, shortName: famLabel, pct, resetTime: reset });
       }
     }
+    const synthesizedGroups = Array.from(familyMap.values()).map((entry) => {
+      const winLabel = inferWindowLabelFromResetTime(entry.resetTime);
+      return {
+        name: entry.name,
+        shortName: entry.shortName,
+        buckets: [{ window: winLabel, label: winLabel, pct: entry.pct, resetTime: entry.resetTime }],
+      };
+    });
+    const geminiEntry = familyMap.get('gemini') || Array.from(familyMap.values())[0] || null;
     return {
       ...empty,
-      fiveHour: { pct: minPct, resetTime: reset },
+      fiveHour: geminiEntry ? { pct: geminiEntry.pct, resetTime: geminiEntry.resetTime } : { pct: null, resetTime: '' },
+      groups: synthesizedGroups,
     };
   }
   return empty;

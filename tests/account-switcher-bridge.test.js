@@ -388,6 +388,18 @@ async function runTests() {
       assert.strictEqual(main.quota.secondaryFiveHour.pct, 90);
       assert.strictEqual(main.quota.secondaryWeekly.pct, 65);
       assert.strictEqual(main.quota.argonWeekly.pct, 98);
+      // Verify dynamic groups[] preserve all pools & sort buckets shortest -> longest
+      assert(Array.isArray(main.quota.groups) && main.quota.groups.length === 3);
+      assert.strictEqual(main.quota.groups[0].shortName, 'Gemini');
+      assert.strictEqual(main.quota.groups[0].buckets.length, 2);
+      assert.strictEqual(main.quota.groups[0].buckets[0].label, '5h');
+      assert.strictEqual(main.quota.groups[0].buckets[0].pct, 78);
+      assert.strictEqual(main.quota.groups[0].buckets[1].label, '周');
+      assert.strictEqual(main.quota.groups[0].buckets[1].pct, 42);
+      assert.strictEqual(main.quota.groups[1].shortName, 'Claude / GPT');
+      assert.strictEqual(main.quota.groups[2].shortName, 'Argon');
+      assert.strictEqual(main.quota.groups[2].buckets.length, 1);
+      assert.strictEqual(main.quota.groups[2].buckets[0].label, '周');
       // Verify zero credential leakage
       const serialized = JSON.stringify(res);
       assert(!serialized.includes('SECRET_ACCESS'));
@@ -396,10 +408,13 @@ async function runTests() {
       assert.strictEqual(main.token, undefined);
       assert.strictEqual(main.refresh_token, undefined);
 
-      // Verify legacy models[] fallback on acct_backup_02
+      // Verify legacy models[] fallback synthesizes dynamic groups on acct_backup_02
       const backup = res.accounts[1];
       assert.strictEqual(backup.plan, 'ULTRA');
       assert.strictEqual(backup.quota.fiveHour.pct, 88);
+      assert(Array.isArray(backup.quota.groups) && backup.quota.groups.length === 1);
+      assert.strictEqual(backup.quota.groups[0].shortName, 'Gemini');
+      assert.strictEqual(backup.quota.groups[0].buckets[0].pct, 88);
     } finally {
       removeDirSafe(tmpHome);
     }
@@ -537,10 +552,12 @@ async function runTests() {
     assert(combined.includes('data-action="acct-delete"'));
     assert(combined.includes('data-action="acct-delete-confirm"'));
     assert(combined.includes('data-action="acct-cancel"'));
-    // Verify compact 1-line summary bar + compact 2-row account strip classes
+    // Verify compact 1-line summary bar + 2-column grid + dynamic pool rows + animated SVG ring classes
     assert(combined.includes('agy-ta-acct-summary-bar'));
-    assert(combined.includes('agy-ta-acct-mini-pools'));
-    assert(combined.includes('agy-ta-qbar'));
+    assert(combined.includes('grid-template-columns: repeat(2, minmax(0, 1fr));'));
+    assert(combined.includes('agy-ta-pool-row'));
+    assert(combined.includes('agy-ta-ring-arc'));
+    assert(combined.includes('agy-ta-pool-only-tag'));
     // Verify unified fixed panel geometry anchored to Daily view
     assert(combined.includes('width: min(860px, 94vw);'));
     assert(combined.includes('height: min(656px, 90vh);'));
@@ -556,16 +573,50 @@ async function runTests() {
     const qStart = combined.indexOf('function formatResetCountdown(');
     const qEnd = combined.indexOf('function syncAccountsChromeAndVisibility(');
     assert(fnStart > 0 && fnEnd > fnStart && qStart > 0 && qEnd > qStart);
-    const helperCtx = vm.createContext({ Date, Math, Number, String });
+    const helperCtx = vm.createContext({ Date, Math, Number, String, Array, Map });
     new vm.Script(combined.slice(fnStart, fnEnd) + '\n' + combined.slice(qStart, qEnd)).runInContext(helperCtx);
+    // XSS escaping check
     const html = helperCtx.renderQuotaBarHtml('<img src=x onerror=1>', { pct: 65, resetTime: new Date(Date.now() + 7500000).toISOString() });
     assert(html.includes('&lt;img src=x onerror=1&gt;'));
     assert(!html.includes('<img '));
     assert(html.includes('65%'));
-    const compactHtml = helperCtx.renderQuotaBarHtml('Gemini 5h 额度', { pct: 78, resetTime: new Date(Date.now() + 17400000).toISOString() }, '5h');
-    assert(compactHtml.includes('agy-ta-qbar'));
-    assert(compactHtml.includes('>5h<'));
-    assert(compactHtml.includes('78%'));
+    // Dual-window pool renders left short bar + right animated SVG ring with inside value & T1 countdown rules
+    const futureShort = new Date(Date.now() + 17400000).toISOString();
+    const futureWeek = new Date(Date.now() + 4 * 86400000).toISOString();
+    const dualHtml = helperCtx.renderPoolRowHtml('acct1', {
+      name: 'Gemini Models',
+      shortName: 'Gemini',
+      buckets: [
+        { window: '5h', label: '5h', pct: 78, resetTime: futureShort },
+        { window: 'weekly', label: '周', pct: 93, resetTime: futureWeek },
+      ],
+    }, 0, new Map(), new Map());
+    assert(dualHtml.includes('agy-ta-pool-row'));
+    assert(dualHtml.includes('agy-ta-ring-arc'));
+    assert(dualHtml.includes('data-target-offset='));
+    assert(dualHtml.includes('>93<'));
+    assert(dualHtml.includes('agy-ta-pool-reset')); // < 100% shows short countdown
+    assert(!dualHtml.includes('agy-ta-ring-depleted-reset')); // weekly 93% keeps weekly countdown in tooltip only
+    // Full 100% short window hides countdown (T1); depleted 0% weekly ring surfaces depleted countdown
+    const fullAndDepletedHtml = helperCtx.renderPoolRowHtml('acct2', {
+      name: 'Claude and GPT models',
+      shortName: 'Claude / GPT',
+      buckets: [
+        { window: 'daily', label: '日', pct: 100, resetTime: futureShort },
+        { window: 'weekly', label: '周', pct: 0, resetTime: futureWeek },
+      ],
+    }, 1, new Map(), new Map());
+    assert(!fullAndDepletedHtml.includes('agy-ta-pool-reset')); // 100% hides countdown
+    assert(fullAndDepletedHtml.includes('agy-ta-ring-depleted-reset')); // 0% weekly surfaces countdown
+    // Plan A single-window pool renders left bar + aligned muted tag (e.g. 仅周)
+    const singleHtml = helperCtx.renderPoolRowHtml('acct3', {
+      name: 'Gemini 4 Argon',
+      shortName: 'Argon',
+      buckets: [{ window: 'weekly', label: '周', pct: 98, resetTime: futureWeek }],
+    }, 2, new Map(), new Map());
+    assert(singleHtml.includes('agy-ta-pool-only-tag'));
+    assert(singleHtml.includes('仅周'));
+    assert(!singleHtml.includes('agy-ta-ring-arc'));
     assert.strictEqual(helperCtx.getQuotaBarColor(75), 'var(--agy-ta-q-good)');
     assert.strictEqual(helperCtx.getQuotaBarColor(30), 'var(--agy-ta-q-warn)');
     assert.strictEqual(helperCtx.getQuotaBarColor(10), 'var(--agy-ta-q-low)');
