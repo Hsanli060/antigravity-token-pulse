@@ -507,14 +507,21 @@ async function runTests() {
     }
   });
 
-  await runCase('7. Privacy audit: zero hardcoded user paths, personal emails, or OAuth secrets in src/', async () => {
-    const files = ['ipc-block.js', 'preload-part1.js', 'preload-part2.js', 'preload-part3.js'];
+  await runCase('7. Privacy audit: zero hardcoded user paths, personal emails, or OAuth secrets in src/ & tools/', async () => {
+    const files = ['ipc-block.js', 'preload-part1.js', 'preload-part2.js', 'preload-part3.js'].map((f) => path.join(SRC_DIR, f));
+    const liteSrcDir = path.join(REPO_ROOT, 'tools', 'agy-switch-lite', 'src');
+    if (fs.existsSync(liteSrcDir)) {
+      for (const f of fs.readdirSync(liteSrcDir).filter((x) => x.endsWith('.rs'))) {
+        files.push(path.join(liteSrcDir, f));
+      }
+    }
     const oauthRe = new RegExp('GOCSPX' + '-|apps\\.googleusercontent\\.com', 'i');
-    for (const f of files) {
-      const content = readSrc(f);
-      assert(!/[A-Za-z]:[\\/]+Users[\\/]+[^\\/'"`\s$%]+/i.test(content), `Found hardcoded user path in ${f}`);
-      assert(!oauthRe.test(content), `Found Google OAuth secret/client in ${f}`);
-      assert(!/@qq\.com|@gmail\.com/i.test(content), `Found personal email in ${f}`);
+    for (const full of files) {
+      const content = fs.readFileSync(full, 'utf8');
+      const rel = path.relative(REPO_ROOT, full);
+      assert(!/[A-Za-z]:[\\/]+Users[\\/]+[^\\/'"`\s$%]+/i.test(content), `Found hardcoded user path in ${rel}`);
+      assert(!oauthRe.test(content), `Found Google OAuth secret/client in ${rel}`);
+      assert(!/@qq\.com|@gmail\.com/i.test(content), `Found personal email in ${rel}`);
     }
   });
 

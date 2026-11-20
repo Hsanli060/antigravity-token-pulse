@@ -10,10 +10,15 @@ Thumbs.db
 app-extracted/
 test-artifacts/
 
+# Rust build outputs & binaries
+tools/agy-switch-lite/target/
+*.exe
+
 # Sensitive local credential / account files (never commit)
 .antigravity_tools/
 accounts.json
-*oauth*
+*oauth*.json
+oauth_creds*
 *token*.json
 *credential*
 telemetry-switch-cli.json
