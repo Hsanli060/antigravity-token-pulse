@@ -1569,7 +1569,7 @@ text-align: center;
 }
 #${MODAL_ID} .agy-ta-pool-row {
 display: grid;
-grid-template-columns: minmax(0, 1fr) 32px 40px;
+grid-template-columns: minmax(0, 1fr) 32px 44px;
 align-items: center;
 column-gap: 8px;
 padding-top: 4px;

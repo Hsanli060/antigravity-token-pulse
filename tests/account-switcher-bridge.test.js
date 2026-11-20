@@ -633,7 +633,7 @@ async function runTests() {
     assert(html.includes('&lt;img src=x onerror=1&gt;'));
     assert(!html.includes('<img '));
     assert(html.includes('65%'));
-    // Dual-window pool renders left animated bar + right animated SVG ring with XX% inside & W1 3-o'clock weekly reset
+    // Dual-window pool renders left long-window (weekly) bar + right animated short-window (5h) SVG ring with XX% inside & 3-o'clock short reset
     const futureShort = new Date(Date.now() + 17400000).toISOString();
     const futureWeek = new Date(Date.now() + 4 * 86400000).toISOString();
     const dualHtml = helperCtx.renderPoolRowHtml('acct1', {
@@ -647,12 +647,13 @@ async function runTests() {
     assert(dualHtml.includes('agy-ta-pool-row'));
     assert(dualHtml.includes('agy-ta-ring-arc'));
     assert(dualHtml.includes('data-target-offset='));
-    assert(dualHtml.includes('data-target-width="78%"'));
-    assert(dualHtml.includes('>93%<'));
-    assert(dualHtml.includes('agy-ta-pool-reset')); // < 100% shows short countdown
-    assert(dualHtml.includes('agy-ta-pool-long-reset')); // W1 shows weekly reset at 3 o'clock when < 100%
-    assert(dualHtml.includes('4d'));
-    // Full 100% hides countdowns (both short & long); 100% inside ring gets .is-full-pct
+    assert(dualHtml.includes('data-target-width="93%"'));
+    assert(dualHtml.includes('>78%<'));
+    assert(dualHtml.includes('agy-ta-pool-reset')); // < 100% weekly shows bar countdown
+    assert(dualHtml.includes('4d')); // weekly reset on left bar
+    assert(dualHtml.includes('agy-ta-pool-long-reset')); // 5h reset at 3 o'clock when < 100%
+    assert(dualHtml.includes('4h')); // 5h reset on right 3-o'clock
+    // Full 100% hides countdowns (both long & short); 100% inside ring gets .is-full-pct
     const fullBothHtml = helperCtx.renderPoolRowHtml('acct2', {
       name: 'Claude and GPT models',
       shortName: 'Claude / GPT',
@@ -665,16 +666,17 @@ async function runTests() {
     assert(fullBothHtml.includes('is-full-pct'));
     assert(fullBothHtml.includes('>100%<'));
     assert(fullBothHtml.includes('<span class="agy-ta-pool-long-reset"></span>'));
-    // Depleted 0% weekly marks long-reset column with is-depleted
-    const depletedWeekHtml = helperCtx.renderPoolRowHtml('acct2b', {
+    // Depleted 0% short-window (5h) marks 3-o'clock ring-reset column with is-depleted; depleted 0% weekly marks bar reset with is-depleted
+    const depletedShortHtml = helperCtx.renderPoolRowHtml('acct2b', {
       name: 'Claude and GPT models',
       shortName: 'Claude / GPT',
       buckets: [
-        { window: 'daily', label: '日', pct: 100, resetTime: futureShort },
+        { window: '5h', label: '5h', pct: 0, resetTime: futureShort },
         { window: 'weekly', label: '周', pct: 0, resetTime: futureWeek },
       ],
     }, 1, new Map(), new Map(), true);
-    assert(depletedWeekHtml.includes('agy-ta-pool-long-reset is-depleted'));
+    assert(depletedShortHtml.includes('agy-ta-pool-reset is-depleted'));
+    assert(depletedShortHtml.includes('agy-ta-pool-long-reset is-depleted'));
     // Plan A single-window pool renders left bar + centered muted tag (e.g. 仅周) with is-single-window
     const singleHtml = helperCtx.renderPoolRowHtml('acct3', {
       name: 'Gemini 4 Argon',

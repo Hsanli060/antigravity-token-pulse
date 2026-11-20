@@ -788,7 +788,7 @@ return fallback;
 }
 function renderQuotaRingHtml(groupName, bucket, prevPct) {
 const pct = bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null;
-const winLabel = (bucket && bucket.label) ? String(bucket.label) : '长周期';
+const winLabel = (bucket && bucket.label) ? String(bucket.label) : '短周期';
 const resetFull = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
 const fullTip = `${groupName} ${winLabel}额度：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
 const strokeColor = getQuotaBarColor(pct);
@@ -815,8 +815,8 @@ return '';
 }
 const fullName = String((group && group.name) || (group && group.shortName) || '模型池');
 const shortName = String((group && group.shortName) || fullName);
-const primary = buckets[0];
-const secondary = buckets.length > 1 ? buckets[buckets.length - 1] : null;
+const primary = buckets[buckets.length - 1];
+const secondary = buckets.length > 1 ? buckets[0] : null;
 const showThirdCol = hasAnyDual !== undefined ? Boolean(hasAnyDual) : Boolean(secondary);
 const pct = primary && typeof primary.pct === 'number' && Number.isFinite(primary.pct) ? Math.max(0, Math.min(100, Math.round(primary.pct))) : null;
 const winLabel = (primary && primary.label) ? String(primary.label) : '额度';
@@ -841,7 +841,7 @@ let ringColHtml = '';
 let longResetColHtml = '';
 if (secondary) {
 const secPct = typeof secondary.pct === 'number' && Number.isFinite(secondary.pct) ? Math.max(0, Math.min(100, Math.round(secondary.pct))) : null;
-const ringKey = `${acctId}:${idx}:${secondary.window || secondary.label || 'long'}`;
+const ringKey = `${acctId}:${idx}:${secondary.window || secondary.label || 'short'}`;
 const prevPct = ringPrevMap && typeof ringPrevMap.get === 'function' ? ringPrevMap.get(ringKey) : undefined;
 if (ringNextMap && typeof ringNextMap.set === 'function' && secPct !== null) {
 ringNextMap.set(ringKey, secPct);
@@ -851,7 +851,7 @@ if (showThirdCol) {
 const secResetShort = secondary.resetTime ? formatResetCountdownCompact(secondary.resetTime) : '';
 const secResetFull = secondary.resetTime ? formatResetCountdown(secondary.resetTime) : '';
 const showSecReset = Boolean(secResetShort && secPct !== null && secPct < 100);
-const secWinLbl = secondary.label ? String(secondary.label) : '长周期';
+const secWinLbl = secondary.label ? String(secondary.label) : '短周期';
 const secTip = showSecReset ? `${fullName} ${secWinLbl}额度 · ${secResetFull || secResetShort}` : '';
 longResetColHtml = `<span class="agy-ta-pool-long-reset${secPct === 0 ? ' is-depleted' : ''}"${secTip ? ` title="${escHtml(secTip)}"` : ''}>${showSecReset ? escHtml(secResetShort) : ''}</span>`;
 }
@@ -1078,8 +1078,8 @@ const q = a && a.quota ? a.quota : null;
 const dynGroups = resolveDynamicQuotaGroups(q);
 const firstGrp = dynGroups[0] || null;
 const firstBuckets = firstGrp && Array.isArray(firstGrp.buckets) ? firstGrp.buckets : [];
-const dynShort = firstBuckets.length > 0 ? firstBuckets[0] : null;
-const dynLong = firstBuckets.length > 1 ? firstBuckets[firstBuckets.length - 1] : null;
+const dynLong = firstBuckets.length > 0 ? firstBuckets[firstBuckets.length - 1] : null;
+const dynShort = firstBuckets.length > 1 ? firstBuckets[0] : null;
 const p5 = (q && q.fiveHour && typeof q.fiveHour.pct === 'number' && Number.isFinite(q.fiveHour.pct))
 ? Math.round(q.fiveHour.pct)
 : (dynShort && typeof dynShort.pct === 'number' ? Math.round(dynShort.pct) : null);
@@ -1992,16 +1992,16 @@ overlay.innerHTML = `
 <span class="agy-ta-acct-sum-sep"></span>
 <span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">账号</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-count-val">0</span></span>
 <span class="agy-ta-acct-sum-sep"></span>
-<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">短周期最高</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-5h-val">--</span></span>
-<span class="agy-ta-acct-sum-sep"></span>
 <span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">长周期最高</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-week-val">--</span></span>
+<span class="agy-ta-acct-sum-sep"></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">短周期最高</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-5h-val">--</span></span>
 </div>
 <div class="agy-ta-acct-panel">
 <div class="agy-ta-section-head">
 <div class="agy-ta-acct-head-left">
 <span class="agy-ta-section-title">账号列表与配额</span>
 <span class="agy-ta-acct-meta" data-role="ta-acct-meta"></span>
-<span class="agy-ta-acct-legend" title="左侧进度条为短周期额度，右侧动态圆环为长周期额度（单周期池直接以进度条展示）">条=短周期 · 环=长周期</span>
+<span class="agy-ta-acct-legend" title="左侧进度条为长周期（周）额度，右侧动态圆环为短周期（5h）额度（单周期池直接以进度条展示）">条=长周期 · 环=短周期</span>
 </div>
 <div class="agy-ta-acct-head-actions">
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add">+ 添加账号</button>
