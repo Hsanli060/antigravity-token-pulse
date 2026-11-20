@@ -664,7 +664,7 @@ return `${hours}h${mins > 0 ? `${mins}m` : ''}`;
 }
 return `${mins}m`;
 }
-const ACCT_RING_CIRCUMFERENCE = 76.6549; // 2 * Math.PI * 12.2
+const ACCT_RING_CIRCUMFERENCE = 86.708; // 2 * Math.PI * 13.8
 function formatQuotaRingOffset(pct) {
 if (pct === null || pct === undefined || !Number.isFinite(Number(pct))) {
 return ACCT_RING_CIRCUMFERENCE.toFixed(2);
@@ -701,30 +701,25 @@ function renderQuotaRingHtml(groupName, bucket, prevPct) {
 const pct = bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null;
 const winLabel = (bucket && bucket.label) ? String(bucket.label) : '长周期';
 const resetFull = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
-const resetShort = bucket && bucket.resetTime ? formatResetCountdownCompact(bucket.resetTime) : '';
 const fullTip = `${groupName} ${winLabel}额度：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
 const strokeColor = getQuotaBarColor(pct);
 const targetOffset = formatQuotaRingOffset(pct);
 const shouldAnimate = pct !== null && (prevPct === undefined || prevPct !== pct);
 const initialOffset = shouldAnimate ? formatQuotaRingOffset(prevPct !== undefined ? prevPct : 0) : targetOffset;
 const isZero = pct === 0;
-const valTxt = pct !== null ? String(pct) : '—';
-const valCls = `agy-ta-ring-val${valTxt.length >= 3 ? ' is-three-digit' : ''}${isZero ? ' is-depleted' : ''}`;
-const depletedResetHtml = (isZero && resetShort)
-? `<span class="agy-ta-ring-depleted-reset" title="${escHtml(resetFull || resetShort)}">${escHtml(resetShort)}</span>`
-: '';
+const valTxt = pct !== null ? `${pct}%` : '—';
+const valCls = `agy-ta-ring-val${valTxt.length >= 4 ? ' is-full-pct' : ''}${isZero ? ' is-depleted' : ''}`;
 return `
 <div class="agy-ta-ring-wrap" title="${escHtml(fullTip)}">
-<svg class="agy-ta-ring-svg" viewBox="0 0 30 30" aria-hidden="true">
-<circle class="agy-ta-ring-bg" cx="15" cy="15" r="12.2"></circle>
-<circle class="agy-ta-ring-arc" cx="15" cy="15" r="12.2" transform="rotate(-90 15 15)" stroke="${strokeColor}" stroke-dasharray="${ACCT_RING_CIRCUMFERENCE.toFixed(2)}" stroke-dashoffset="${initialOffset}"${isZero ? ' stroke-opacity="0"' : ''}${shouldAnimate ? ` data-target-offset="${targetOffset}"` : ''}></circle>
+<svg class="agy-ta-ring-svg" viewBox="0 0 32 32" aria-hidden="true">
+<circle class="agy-ta-ring-bg" cx="16" cy="16" r="13.8"></circle>
+<circle class="agy-ta-ring-arc" cx="16" cy="16" r="13.8" transform="rotate(-90 16 16)" stroke="${strokeColor}" stroke-dasharray="${ACCT_RING_CIRCUMFERENCE.toFixed(2)}" stroke-dashoffset="${initialOffset}"${isZero ? ' stroke-opacity="0"' : ''}${shouldAnimate ? ` data-target-offset="${targetOffset}"` : ''}></circle>
 </svg>
 <span class="${valCls}">${escHtml(valTxt)}</span>
 </div>
-${depletedResetHtml}
 `;
 }
-function renderPoolRowHtml(acctId, group, idx, ringPrevMap, ringNextMap) {
+function renderPoolRowHtml(acctId, group, idx, ringPrevMap, ringNextMap, hasAnyDual) {
 const buckets = Array.isArray(group && group.buckets) ? group.buckets : [];
 if (buckets.length === 0) {
 return '';
@@ -733,6 +728,7 @@ const fullName = String((group && group.name) || (group && group.shortName) || '
 const shortName = String((group && group.shortName) || fullName);
 const primary = buckets[0];
 const secondary = buckets.length > 1 ? buckets[buckets.length - 1] : null;
+const showThirdCol = hasAnyDual !== undefined ? Boolean(hasAnyDual) : Boolean(secondary);
 const pct = primary && typeof primary.pct === 'number' && Number.isFinite(primary.pct) ? Math.max(0, Math.min(100, Math.round(primary.pct))) : null;
 const winLabel = (primary && primary.label) ? String(primary.label) : '额度';
 const resetFull = primary && primary.resetTime ? formatResetCountdown(primary.resetTime) : '';
@@ -745,21 +741,34 @@ const widthPct = pct !== null ? pct : 0;
 const resetHtml = showReset
 ? `<span class="agy-ta-pool-reset${isDepleted ? ' is-depleted' : ''}">· ${escHtml(resetShort)}</span>`
 : '';
-let rightHtml = '';
+let ringColHtml = '';
+let longResetColHtml = '';
 if (secondary) {
+const secPct = typeof secondary.pct === 'number' && Number.isFinite(secondary.pct) ? Math.max(0, Math.min(100, Math.round(secondary.pct))) : null;
 const ringKey = `${acctId}:${idx}:${secondary.window || secondary.label || 'long'}`;
 const prevPct = ringPrevMap && typeof ringPrevMap.get === 'function' ? ringPrevMap.get(ringKey) : undefined;
-if (ringNextMap && typeof ringNextMap.set === 'function' && typeof secondary.pct === 'number' && Number.isFinite(secondary.pct)) {
-ringNextMap.set(ringKey, Math.max(0, Math.min(100, Math.round(secondary.pct))));
+if (ringNextMap && typeof ringNextMap.set === 'function' && secPct !== null) {
+ringNextMap.set(ringKey, secPct);
 }
-rightHtml = renderQuotaRingHtml(fullName, secondary, prevPct);
+ringColHtml = renderQuotaRingHtml(fullName, secondary, prevPct);
+if (showThirdCol) {
+const secResetShort = secondary.resetTime ? formatResetCountdownCompact(secondary.resetTime) : '';
+const secResetFull = secondary.resetTime ? formatResetCountdown(secondary.resetTime) : '';
+const showSecReset = Boolean(secResetShort && secPct !== null && secPct < 100);
+const secWinLbl = secondary.label ? String(secondary.label) : '长周期';
+const secTip = showSecReset ? `${fullName} ${secWinLbl}额度 · ${secResetFull || secResetShort}` : '';
+longResetColHtml = `<span class="agy-ta-pool-long-reset${secPct === 0 ? ' is-depleted' : ''}"${secTip ? ` title="${escHtml(secTip)}"` : ''}>${showSecReset ? escHtml(secResetShort) : ''}</span>`;
+}
 }
 else {
 const onlyTag = `仅${winLabel}`;
-rightHtml = `<span class="agy-ta-pool-only-tag" title="${escHtml(`${fullName}仅包含${winLabel}周期限额`)}">${escHtml(onlyTag)}</span>`;
+ringColHtml = `<span class="agy-ta-pool-only-tag" title="${escHtml(`${fullName}仅包含${winLabel}周期限额`)}">${escHtml(onlyTag)}</span>`;
+if (showThirdCol) {
+longResetColHtml = `<span class="agy-ta-pool-long-reset"></span>`;
+}
 }
 return `
-<div class="agy-ta-pool-row">
+<div class="agy-ta-pool-row${secondary ? '' : ' is-single-window'}">
 <div class="agy-ta-pool-left" title="${escHtml(barTip)}">
 <div class="agy-ta-pool-head">
 <span class="agy-ta-pool-meta">
@@ -771,7 +780,8 @@ ${resetHtml}
 </div>
 <div class="agy-ta-pool-track"><div class="agy-ta-pool-fill" style="width:${widthPct}%; background:${fillColor};"></div></div>
 </div>
-<div class="agy-ta-pool-right">${rightHtml}</div>
+<div class="agy-ta-pool-ring-col">${ringColHtml}</div>
+${longResetColHtml}
 </div>
 `;
 }
@@ -1083,8 +1093,9 @@ else {
 actionHtml = `<button type="button" class="agy-ta-acct-btn" data-action="acct-switch" data-account-id="${escHtml(acct.id)}"${anyBusy ? ' disabled' : ''}>切换</button>${deleteTriggerHtml}`;
 }
 const dynGroups = resolveDynamicQuotaGroups(acct.quota);
+const hasAnyDual = dynGroups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 1);
 const poolsHtml = dynGroups.length > 0
-? dynGroups.map((grp, idx) => renderPoolRowHtml(acct.id, grp, idx, accountsRingRenderedPct, nextRingPctMap)).join('')
+? dynGroups.map((grp, idx) => renderPoolRowHtml(acct.id, grp, idx, accountsRingRenderedPct, nextRingPctMap, hasAnyDual)).join('')
 : `<div class="agy-ta-acct-no-quota">${acct.isForbidden ? '当前账号配额接口受限' : '暂无配额缓存，点击上方「刷新额度」获取'}</div>`;
 return `
 <div class="agy-ta-row agy-ta-acct-row${isCurrent ? ' is-active' : ''}${isUnavailable ? ' is-disabled' : ''}">
@@ -1098,7 +1109,7 @@ ${statusTags}
 </div>
 <div class="agy-ta-acct-actions">${actionHtml}</div>
 </div>
-<div class="agy-ta-acct-pools">
+<div class="agy-ta-acct-pools${hasAnyDual ? '' : ' is-single-only'}">
 ${poolsHtml}
 </div>
 </div>

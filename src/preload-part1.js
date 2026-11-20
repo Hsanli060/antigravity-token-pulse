@@ -1523,7 +1523,7 @@ background: var(--agy-ta-tabs-bg);
 #${MODAL_ID} .agy-ta-acct-pools {
 display: flex;
 flex-direction: column;
-gap: 6px;
+gap: 5px;
 min-width: 0;
 }
 #${MODAL_ID} .agy-ta-acct-no-quota {
@@ -1534,25 +1534,39 @@ text-align: center;
 }
 #${MODAL_ID} .agy-ta-pool-row {
 display: grid;
-grid-template-columns: minmax(0, 1fr) 34px;
+grid-template-columns: minmax(0, 1fr) 32px 40px;
 align-items: center;
-gap: 9px;
-min-height: 28px;
+column-gap: 8px;
+padding-top: 4px;
 min-width: 0;
+}
+#${MODAL_ID} .agy-ta-acct-pools.is-single-only .agy-ta-pool-row {
+grid-template-columns: minmax(0, 1fr) 36px;
+}
+#${MODAL_ID} .agy-ta-pool-row.is-single-window {
+padding-top: 6px;
 }
 #${MODAL_ID} .agy-ta-pool-left {
+position: relative;
 display: flex;
-flex-direction: column;
-gap: 4px;
+align-items: center;
+height: 32px;
 min-width: 0;
 }
+#${MODAL_ID} .agy-ta-pool-row.is-single-window .agy-ta-pool-left {
+height: 26px;
+}
 #${MODAL_ID} .agy-ta-pool-head {
+position: absolute;
+left: 0;
+right: 0;
+bottom: calc(50% + 5.5px);
 display: flex;
 align-items: baseline;
 justify-content: space-between;
 gap: 6px;
 min-width: 0;
-line-height: 1.15;
+line-height: 1.1;
 }
 #${MODAL_ID} .agy-ta-pool-meta {
 display: inline-flex;
@@ -1609,37 +1623,40 @@ height: 100%;
 border-radius: 999px;
 transition: width 0.38s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.25s ease;
 }
-#${MODAL_ID} .agy-ta-pool-right {
+#${MODAL_ID} .agy-ta-pool-ring-col {
 display: flex;
-flex-direction: column;
 align-items: center;
 justify-content: center;
-width: 34px;
+width: 32px;
+height: 32px;
 flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-pool-row.is-single-window .agy-ta-pool-ring-col {
+height: 26px;
 }
 #${MODAL_ID} .agy-ta-ring-wrap {
 position: relative;
-width: 28px;
-height: 28px;
+width: 32px;
+height: 32px;
 display: inline-flex;
 align-items: center;
 justify-content: center;
 cursor: default;
 }
 #${MODAL_ID} .agy-ta-ring-svg {
-width: 28px;
-height: 28px;
+width: 32px;
+height: 32px;
 display: block;
 overflow: visible;
 }
 #${MODAL_ID} .agy-ta-ring-bg {
 fill: none;
 stroke: var(--agy-ta-ring-track);
-stroke-width: 2.7;
+stroke-width: 2.4;
 }
 #${MODAL_ID} .agy-ta-ring-arc {
 fill: none;
-stroke-width: 2.7;
+stroke-width: 2.4;
 stroke-linecap: round;
 transition: stroke-dashoffset 0.48s cubic-bezier(0.4, 0, 0.2, 1), stroke 0.25s ease;
 }
@@ -1649,26 +1666,32 @@ inset: 0;
 display: flex;
 align-items: center;
 justify-content: center;
-font-size: 9.5px;
+font-size: 8.5px;
 font-weight: 700;
+letter-spacing: -0.2px;
 line-height: 1;
 color: var(--agy-ta-comp-val-fg);
 pointer-events: none;
 }
-#${MODAL_ID} .agy-ta-ring-val.is-three-digit {
-font-size: 8.2px;
+#${MODAL_ID} .agy-ta-ring-val.is-full-pct {
+font-size: 7.4px;
 letter-spacing: -0.45px;
 }
 #${MODAL_ID} .agy-ta-ring-val.is-depleted {
 color: var(--agy-ta-q-low);
 }
-#${MODAL_ID} .agy-ta-ring-depleted-reset {
-font-size: 8.5px;
-line-height: 1.1;
-margin-top: 1px;
+#${MODAL_ID} .agy-ta-pool-long-reset {
+font-size: 10px;
+line-height: 1;
+color: var(--agy-ta-muted);
+text-align: left;
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+}
+#${MODAL_ID} .agy-ta-pool-long-reset.is-depleted {
 color: var(--agy-ta-q-low);
 font-weight: 600;
-white-space: nowrap;
 }
 #${MODAL_ID} .agy-ta-pool-only-tag {
 font-size: 9.5px;
