@@ -7,6 +7,22 @@
 
 ---
 
+## 界面预览
+
+### 1. Token 活动热力图与每日消耗明细（Desktop + CLI 双端同步）
+
+![Token 活动热力图与每日消耗明细](docs/images/preview-daily.jpg)
+
+### 2. 累计总量与各模型消耗分布（含分模型独立缓存命中率）
+
+![累计总量与各模型消耗分布](docs/images/preview-models.jpg)
+
+### 3. 内置多账号管理与实时双周期配额仪表盘（当前账号置顶）
+
+![内置多账号管理与实时双周期配额仪表盘](docs/images/preview-accounts.jpg)
+
+---
+
 ## 核心特性
 
 ### 1. 实时遥测状态栏（Antigravity 2.0 桌面端 + `agy` CLI）
@@ -208,6 +224,10 @@ antigravity-token-pulse/
 │   └── release-agy-switch.yml            # GitHub Actions 自动构建并发布带 SHA-256 校验的 agy-switch.exe
 ├── .gitattributes                        # 显式 *.bat/*.cmd 为 CRLF（配合单行引导头兼容 Raw LF 与 ZIP），*.js/*.md 为 LF
 ├── Antigravity-Telemetry-Installer.bat   # 一键安装 / 升级 / 恢复器（自动部署内置账号引擎、独立进程重启并自动关闭终端）
+├── docs/images/                          # README 界面预览效果图
+│   ├── preview-daily.jpg
+│   ├── preview-models.jpg
+│   └── preview-accounts.jpg
 ├── src/
 │   ├── patch-asar.js                     # 桌面端 ASAR 独立注入脚本（支持目录与 .asar 原地注入/还原）
 │   ├── ipc-block.js                      # Electron 主进程 IPC 数据采集、账本聚合与内置账号引擎桥接模块
