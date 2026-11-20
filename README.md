@@ -19,22 +19,28 @@
 - 点击遥测栏任意位置，打开活动分析弹窗：
   - **每天 (Daily)**：类似 GitHub Contribution 的 53 周热力矩阵，直观查看每日 Token 消耗与热区分布
   - **每周 (Weekly)**：按自然周聚合统计周度 Token 消耗对比
-  - **每月 (Monthly) / 累计总量**：按月度及全历史周期统计 Token 消耗总账与构成分布
+  - **每月 (Monthly) / 累计总量**：按月度及全历史周期统计 Token 消耗总账与构成分布；「累计总量」页面同时展示**各模型独立的缓存命中率**（`输入 · 缓存 (XX.X%) · 输出 · 步数`），直观对比不同模型的缓存效率
 - **`[端侧 | 模型]` 一键切换与动态模型配色**：
   - 支持在「端侧分布（Desktop / CLI）」与「模型分布（按主模型聚合，自动合并思考档位）」之间一键切换
   - **零硬编码动态识别**：直接从本地会话账本与 SQLite 元数据提取模型列表（兼容官方 `@default` / 日期后缀及 `provider/` 前缀），未来上架或下架模型均可自动适配
   - **自适应浅 / 深色主题**：底栏文字、SVG 图标与 Token 活动热力图弹窗均会自动感知 Antigravity 2.0 官方浅色 / 深色主题并实时切换配色，切换主题无需重启客户端
 - **桌面端 + CLI 数据自动合并**：`agy` CLI 的实时 Token 消耗会自动同步到 `~/.gemini/telemetry-activity-cache.json`（支持 `ANTIGRAVITY_CLI_HOME` 自定义路径），桌面端热力图自动聚合 Antigravity 2.0 与 `agy` 两端历史对话账本。
 
-### 2.5 可选外部 CLI 账号管理桥接（默认隐藏、按需启用）
-- **零侵入与进程隔离设计**：本插件本身**不包含**任何 OAuth 密钥、凭据解析或网络配额接口，仅作为轻量前端入口；仅在检测到本机存在外部 [`agy-switch`](https://github.com/anglee0323/agy-switch) 或其精简无头兼容 CLI（`agy-switch.exe` / `agy-switch`）时，在 Token 活动弹窗中自动显示 **「账号」** 标签页（未安装时完全隐藏，零界面干扰），且 5 个标签页统一固定为「每天」视图基准尺寸，切换无跳动。
-- **核心交互（高信息密度紧凑视图）**：
-  - **单行状态摘要 + 双列动态仪表盘卡片**：顶部为单行轻量状态条（当前激活账号 / 可用数 / 短周期与长周期最高余量），列表采用双列卡片网格（窄屏自动单列），零硬编码动态适配 Free / Pro / Ultra 等不同套餐的任意模型池数量与限额周期；每个双周期池采用「左短周期细进度条 + 右动态外圈进度圆环（环内直接展示长周期余量，悬停查看重置时间，耗尽时自动外显倒计时）」，单周期池自动以进度条 + 对齐标签展示；
-  - **自动对齐当前登录账号 (`同步当前`)**：若外部 CLI 声明支持 `sync` 能力（通过 `--version --json` 探测），打开弹窗时会自动静默对齐并导入当前正在登录的 Antigravity 2.0 账号，也可手动点击 **「同步当前」**；
-  - **添加账号 (`+ 添加账号`)**：若外部 CLI 支持原生 `add --json` 则直接无窗口拉起；否则自动回退为后台无窗口伪终端（Windows ConPTY / Unix PTY）静默驱动 Google OAuth 并打开浏览器登录（全程无黑框）；面板内提供「重新打开浏览器 / 复制链接 / 取消」，授权完成后自动同步；
-  - **删除账号 (`删除`)**：内联二次确认（**「确认删除 / 取消」**）后，优先调用外部 CLI 原生 `delete <id> --json`，否则原子清理本地 `accounts.json` 索引与对应条目文件（不影响正在运行的客户端会话）；
-  - **刷新额度 (`刷新额度`)**：手动按需触发外部 CLI 查询最新配额（不开启后台定时轮询）；
-  - **切换账号 (`切换`)**：内联二次确认（**「确认切换 / 取消」**）防误触；确认后以独立脱离子进程（`detached`、`shell: false`）交由外部 CLI 优雅关闭并重启客户端，同步切换 Antigravity 2.0 与 `agy` CLI。
+### 2.5 可选外部 CLI 账号管理桥接与精简后端 `agy-switch-lite`（默认隐藏、按需启用）
+- **零侵入与进程隔离设计**：前端插件本身**不包含**任何 OAuth 密钥、凭据解析或网络配额接口，仅作为轻量入口；仅在检测到本机存在外部兼容 CLI（如本仓库 [`tools/agy-switch-lite`](tools/agy-switch-lite/README.md) 编译产物或 [`agy-switch`](https://github.com/anglee0323/agy-switch)）时，在 Token 活动弹窗中自动显示 **「账号」** 标签页（未安装时完全隐藏，零界面干扰），且 5 个标签页统一固定为「每天」视图基准尺寸，切换无跳动。
+- **核心交互（双列动态仪表盘）**：
+  - **单行状态摘要 + 双列动态模型池卡片**：顶部为单行轻量状态条（当前激活账号 / 可用数 / 短周期与长周期最高余量），列表采用双列自适应网格（窄屏自动退回单列），零硬编码动态适配 Free / Pro / Ultra 等不同套餐的任意模型池数量与限额周期；
+  - **三点一线可视化配额**：每个双周期池采用「左短周期细进度条（正对圆环 9 点钟）+ 右 32px 动态外圈进度圆环（环内直接显示 `XX%` / `100%`）+ 3 点钟独立长周期重置倒计时（满额自动隐藏、耗尽标红）」；单周期池（如 Argon 仅周额度）自动以进度条 + 对齐标签（如 `仅周`）展示；
+  - **自动对齐当前登录账号 (`同步当前`)**：若外部 CLI 支持 `sync` 能力（通过 `--version --json` 自动探测），打开弹窗时会自动静默对齐并导入当前正在登录的 Antigravity 2.0 账号，也可随时手动点击 **「同步当前」**；
+  - **添加账号 (`+ 添加账号`)**：支持原生无头 `add --json` 直接无窗口拉起（旧版外部 CLI 自动回退为后台无窗口伪终端 ConPTY/PTY），直接打开系统浏览器完成 Google OAuth 登录（全程无黑框）；面板内提供「重新打开浏览器 / 复制链接 / 取消」，授权完成后自动同步；
+  - **删除账号 (`删除`)**：内联二次确认（**「确认 / 取消」**）后优先调用原生 `delete <id> --json`（否则原子清理本地 `accounts.json` 索引与对应条目文件，不影响当前运行会话）；
+  - **极速刷新额度 (`刷新额度`)**：手动按需触发外部 CLI 查询最新配额（不开启后台定时轮询）；配合 `agy-switch-lite` 支持多账号并发刷新（默认 20 并发、可通过 `AGY_SWITCH_REFRESH_CONCURRENCY` 在 `1~32` 间自定义）+ 单账号 3 接口并发 + 全局 HTTP/2 连接池复用；
+  - **无感重启切换 (`切换`)**：内联二次确认（**「确认 / 取消」**）防误触；确认后交由独立进程优雅关闭、写入凭据并自动重新拉起 Antigravity 2.0，同步切换桌面端与 `agy` CLI。
+- **附带精简无头 Rust 后端（[`tools/agy-switch-lite/`](tools/agy-switch-lite/README.md)）**：
+  - 纯 Rust 精简实现（仅 ~3 MB、移除 GUI/WebView/TUI/托盘/反代等冗余模块），仅直连 Google 官方接口；
+  - **Windows DPAPI 本机用户级加密**：所有保存于 `~/.antigravity_tools/accounts/*.json` 的 `access_token` / `refresh_token` / `id_token` 及本地 OAuth 客户端缓存均自动以 Windows `CryptProtectData`（`dpapi:v1:`）加密落盘，旧版明文文件首次读取时自动无感迁移为密文；
+  - **源码零硬编码 OAuth 密钥**：运行期按「环境变量 → 本地 DPAPI 缓存 → 自动从本机官方 Antigravity 2.0 / `agy` CLI 定位并校验」解析；
+  - **WMI 脱离 Job 稳定重启**：自动检测 Windows Job Object `KILL_ON_JOB_CLOSE` 限制并通过 WMI `Win32_Process.Create`（`ShowWindow = 0`）脱离宿主进程树，确保关闭客户端后可靠完成凭据写入与客户端重启。
 - **CLI 路径自动探测顺序**（无需改代码）：
   1. 环境变量 `ANTIGRAVITY_SWITCH_CLI`（可填可执行文件路径或其所在目录）
   2. 本地配置文件 `~/.gemini/telemetry-switch-cli.json` 中的 `{"cliPath": "..."}`
@@ -202,7 +208,20 @@ antigravity-token-pulse/
 │   ├── preload-part3.js                  # 实时遥测栏 DOM 挂载与轮询模块 (3/3)
 │   └── agy-statusline.js                 # agy CLI 终端状态栏 + Token 缓存同步脚本
 ├── tests/
-│   └── account-switcher-bridge.test.js   # 外部 CLI 桥接安全、解析与注入语法自动化测试
+│   └── account-switcher-bridge.test.js   # 外部 CLI 桥接安全、解析、隐私扫描与注入语法自动化测试
+├── tools/
+│   └── agy-switch-lite/                  # 可选精简无头 Rust CLI 后端源码（~3 MB，支持 DPAPI 加密与并发刷新）
+│       ├── Cargo.toml
+│       ├── README.md
+│       └── src/
+│           ├── main.rs                   # 无头 JSON CLI 入口（sync/list/add/delete/refresh/switch）
+│           ├── dpapi.rs                  # Windows DPAPI 本机用户级凭证加解密模块
+│           ├── oauth.rs                  # 零硬编码密钥运行期解析与本地回环 OAuth 授权流
+│           ├── quota.rs                  # Google Cloud Code 并发配额查询模块
+│           ├── store.rs                  # 原子读写、DPAPI 自动迁移与切换互斥锁
+│           ├── system.rs                 # WinCred、state.vscdb 注入、WMI 脱离 Job 稳定重启
+│           ├── protobuf.rs               # state.vscdb Unified State Sync Protobuf 编解码
+│           └── models.rs                 # 账号与动态配额组数据结构
 ├── .gitignore
 ├── LICENSE                               # MIT License
 └── README.md
@@ -213,8 +232,9 @@ antigravity-token-pulse/
 ## 隐私与安全说明
 
 - **100% 本地统计**：所有 Token 读取与热力图统计均只访问本地 `~/.gemini/antigravity/...`、`~/.gemini/antigravity-cli/...` 与 `~/.gemini/telemetry-activity-cache.json`，**不上传任何对话或统计数据到任何服务器**。
-- **可选外部 CLI 桥接安全边界**：账号切换 IPC 仅校验本地 `localhost`/`127.0.0.1` 顶层来源、以 `shell: false` 严格白名单调用用户自行安装的外部 `agy-switch` CLI，**绝不向渲染层传递任何 Token / 密钥字段**；未安装外部 CLI 时功能自动隐藏。
-- **全部源码可审计**：`src/` 目录下所有注入模块均为明文 JavaScript，安装器不会执行任何隐藏二进制。
+- **可选外部 CLI 桥接安全边界**：账号切换 IPC 仅校验本地 `localhost`/`127.0.0.1` 顶层来源、以 `shell: false` 严格白名单调用用户自行编译/安装的外部 CLI，**绝不向渲染层传递任何 Token / 密钥字段**；未安装外部 CLI 时功能自动隐藏。
+- **DPAPI 加密与零硬编码密钥（`tools/agy-switch-lite`）**：账号本地缓存中的 `access_token` / `refresh_token` / `id_token` 均采用 Windows DPAPI 本机用户级加密（`dpapi:v1:`），源码仓库内不包含任何 Google OAuth `client_id` / `client_secret`、个人路径或邮箱，且所有网络请求仅直连 Google 官方域名。
+- **全部源码可审计**：`src/` 下所有注入模块为明文 JavaScript，`tools/agy-switch-lite/` 为完整 Rust 源码，安装器不会执行任何隐藏二进制。
 
 ---
 
