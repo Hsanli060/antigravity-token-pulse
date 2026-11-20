@@ -52,7 +52,20 @@ return `<span class="agy-ta-month-lbl" style="left:${leftPx}px;">${escHtml(m.lab
 .join('');
 activityRenderedTodayKey = todayKey;
 }
-function buildDualProgressHtml(desktop, cli, total, maxTotal) {
+function resolveBreakdownBarAnim(barKey, targetPct, prevMap, nextMap) {
+const clamped = Math.max(0, Math.min(100, Number(targetPct) || 0));
+const prev = barKey && prevMap && typeof prevMap.get === 'function' ? prevMap.get(barKey) : undefined;
+if (barKey && nextMap && typeof nextMap.set === 'function') {
+nextMap.set(barKey, clamped);
+}
+const shouldAnimate = (prev === undefined && clamped > 0) || (prev !== undefined && Math.abs(prev - clamped) >= 0.05);
+const initial = shouldAnimate ? (prev !== undefined ? prev : 0) : clamped;
+return {
+initialStr: initial.toFixed(2),
+targetAttr: shouldAnimate ? ` data-target-width="${clamped.toFixed(2)}%"` : '',
+};
+}
+function buildDualProgressHtml(desktop, cli, total, maxTotal, barKey, prevMap, nextMap) {
 const t = Number(total) || 0;
 const d = Number(desktop) || 0;
 const c = Number(cli) || 0;
@@ -60,16 +73,17 @@ const widthPct = maxTotal > 0 && t > 0 ? Math.max(2, Math.min(100, (t / maxTotal
 const splitTotal = d + c;
 const desktopPct = splitTotal > 0 ? (d / splitTotal) * 100 : (t > 0 ? 100 : 0);
 const cliPct = splitTotal > 0 ? Math.max(0, 100 - desktopPct) : 0;
+const anim = resolveBreakdownBarAnim(barKey, widthPct, prevMap, nextMap);
 return `
 <div class="agy-ta-bar-track">
-<div class="agy-ta-bar-fill" style="width:${widthPct.toFixed(2)}%;">
+<div class="agy-ta-bar-fill" style="width:${anim.initialStr}%;"${anim.targetAttr}>
 <div class="agy-ta-seg-desktop" style="width:${desktopPct.toFixed(2)}%;"></div>
 <div class="agy-ta-seg-cli" style="width:${cliPct.toFixed(2)}%;"></div>
 </div>
 </div>
 `;
 }
-function buildModelProgressHtml(modelsObj, total, maxTotal, palette) {
+function buildModelProgressHtml(modelsObj, total, maxTotal, palette, barKey, prevMap, nextMap) {
 const t = Number(total) || 0;
 const widthPct = maxTotal > 0 && t > 0 ? Math.max(2, Math.min(100, (t / maxTotal) * 100)) : 0;
 const entries = getSortedModelEntries(modelsObj);
@@ -86,9 +100,10 @@ return `<div class="agy-ta-seg-model" style="width:${pct.toFixed(2)}%; backgroun
 else {
 segsHtml = `<div class="agy-ta-seg-model" style="width:100%; background:#64748B;"></div>`;
 }
+const anim = resolveBreakdownBarAnim(barKey, widthPct, prevMap, nextMap);
 return `
 <div class="agy-ta-bar-track">
-<div class="agy-ta-bar-fill" style="width:${widthPct.toFixed(2)}%;">
+<div class="agy-ta-bar-fill" style="width:${anim.initialStr}%;"${anim.targetAttr}>
 ${segsHtml}
 </div>
 </div>
@@ -232,6 +247,11 @@ return items.map(it =>
 `<span class="agy-ta-src-item${it.isOther ? ' is-other' : ''}" title="${escHtml(it.title)}"><span class="agy-ta-src-dot" style="background:${it.color};"></span><span class="agy-ta-ellipsis">${escHtml(it.name)}</span></span>`
 ).join('');
 }
+function buildModelsSig(modelsObj) {
+const entries = getSortedModelEntries(modelsObj);
+if (entries.length === 0) return '';
+return entries.map(([n, m]) => `${n}:${Number(m.total) || 0}:${Number(m.in) || 0}:${Number(m.cache) || 0}:${Number(m.out) || 0}:${Number(m.steps) || 0}`).join(',');
+}
 function renderBreakdownSection(stats) {
 if (!activityOverlayEl)
 return;
@@ -254,6 +274,11 @@ for (const btn of modeBtns) {
 btn.classList.toggle('is-active', btn.getAttribute('data-mode') === activityBreakdownMode);
 }
 }
+const viewKey = `${activityActiveTab}:${activityActiveTab === 'total' ? 'total' : activityBreakdownMode}`;
+if (viewKey !== breakdownRenderedViewKey) {
+breakdownBarRenderedPct.clear();
+breakdownRenderedSignature = '';
+}
 const palette = buildModelColorMap(stats);
 const updateLegend = (rows) => {
 if (!srcLegendEl)
@@ -270,6 +295,9 @@ srcLegendEl.innerHTML = renderModelLegend(rows, palette);
 };
 const days = stats.days || {};
 const weekdayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const nextBreakdownBarMap = new Map();
+let nextSig = '';
+let nextHtml = '';
 if (activityActiveTab === 'daily') {
 titleEl.textContent = '每日消耗明细（近 10 个活跃日）';
 titleEl.title = titleEl.textContent;
@@ -279,12 +307,19 @@ const rows = Object.keys(days)
 .sort((a, b) => (a.dateStr < b.dateStr ? 1 : -1))
 .slice(0, 10);
 updateLegend(rows);
+nextSig = `${viewKey}|${stats.todayKey}|${activityFetchError ? 1 : 0}|` + rows.map((r) => `${r.dateStr}:${r.total}:${r.desktop}:${r.cli}:${r.in}:${r.cache}:${r.out}:${activityBreakdownMode === 'model' ? buildModelsSig(r.models) : ''}`).join(';');
+if (viewKey === breakdownRenderedViewKey && nextSig === breakdownRenderedSignature && listEl.childElementCount > 0) {
+return;
+}
 if (rows.length === 0) {
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = viewKey;
+breakdownRenderedSignature = nextSig;
 listEl.innerHTML = `<div class="agy-ta-empty">${activityFetchError ? '无法读取统计数据，请确认主进程已注入最新遥测模块' : '暂无 Token 消耗记录'}</div>`;
 return;
 }
 const maxTotal = rows.reduce((mx, r) => Math.max(mx, r.total), 0);
-listEl.innerHTML = rows
+nextHtml = rows
 .map((r) => {
 const dt = parseDateKeyLocal(r.dateStr);
 const wd = weekdayNames[dt.getDay()];
@@ -292,9 +327,10 @@ const isToday = r.dateStr === stats.todayKey;
 const periodLabel = `${r.dateStr} · ${wd}`;
 const rowTooltip = buildModelTooltipAttr(periodLabel, r.models);
 const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
+const barKey = `${viewKey}:${r.dateStr}`;
 const barHtml = activityBreakdownMode === 'model'
-? buildModelProgressHtml(r.models, r.total, maxTotal, palette)
-: buildDualProgressHtml(r.desktop, r.cli, r.total, maxTotal);
+? buildModelProgressHtml(r.models, r.total, maxTotal, palette, barKey, breakdownBarRenderedPct, nextBreakdownBarMap)
+: buildDualProgressHtml(r.desktop, r.cli, r.total, maxTotal, barKey, breakdownBarRenderedPct, nextBreakdownBarMap);
 const leftSubText = `输入 ${formatActivityTokens(r.in)} · 缓存 ${formatActivityTokens(r.cache)} (${calcCachePct(r)}%) · 输出 ${formatActivityTokens(r.out)}`;
 const srcSubText = `Desktop ${formatActivityTokens(r.desktop)} · CLI ${formatActivityTokens(r.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
@@ -344,20 +380,28 @@ const rows = Array.from(weekMap.values())
 .sort((a, b) => (a.startKey < b.startKey ? 1 : -1))
 .slice(0, 8);
 updateLegend(rows);
+nextSig = `${viewKey}|${thisWeekInfo.key}|${activityFetchError ? 1 : 0}|` + rows.map((w) => `${w.key}:${w.total}:${w.desktop}:${w.cli}:${w.activeDays}:${w.cache}:${w.out}:${activityBreakdownMode === 'model' ? buildModelsSig(w.models) : ''}`).join(';');
+if (viewKey === breakdownRenderedViewKey && nextSig === breakdownRenderedSignature && listEl.childElementCount > 0) {
+return;
+}
 if (rows.length === 0) {
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = viewKey;
+breakdownRenderedSignature = nextSig;
 listEl.innerHTML = `<div class="agy-ta-empty">${activityFetchError ? '无法读取统计数据，请确认主进程已注入最新遥测模块' : '暂无每周消耗记录'}</div>`;
 return;
 }
 const maxTotal = rows.reduce((mx, r) => Math.max(mx, r.total), 0);
-listEl.innerHTML = rows
+nextHtml = rows
 .map((w) => {
 const isCur = w.key === thisWeekInfo.key;
 const periodLabel = `${w.key} (${w.range})`;
 const rowTooltip = buildModelTooltipAttr(periodLabel, w.models);
 const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
+const barKey = `${viewKey}:${w.key}`;
 const barHtml = activityBreakdownMode === 'model'
-? buildModelProgressHtml(w.models, w.total, maxTotal, palette)
-: buildDualProgressHtml(w.desktop, w.cli, w.total, maxTotal);
+? buildModelProgressHtml(w.models, w.total, maxTotal, palette, barKey, breakdownBarRenderedPct, nextBreakdownBarMap)
+: buildDualProgressHtml(w.desktop, w.cli, w.total, maxTotal, barKey, breakdownBarRenderedPct, nextBreakdownBarMap);
 const leftSubText = `活跃 ${w.activeDays} 天 · 缓存率 ${calcCachePct(w)}% · 输出 ${formatActivityTokens(w.out)}`;
 const srcSubText = `Desktop ${formatActivityTokens(w.desktop)} · CLI ${formatActivityTokens(w.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
@@ -407,12 +451,19 @@ const rows = Array.from(monthMap.values())
 .sort((a, b) => (a.ym < b.ym ? 1 : -1))
 .slice(0, 12);
 updateLegend(rows);
+nextSig = `${viewKey}|${curYm}|${activityFetchError ? 1 : 0}|` + rows.map((m) => `${m.ym}:${m.total}:${m.desktop}:${m.cli}:${m.activeDays}:${m.in}:${m.cache}:${m.out}:${activityBreakdownMode === 'model' ? buildModelsSig(m.models) : ''}`).join(';');
+if (viewKey === breakdownRenderedViewKey && nextSig === breakdownRenderedSignature && listEl.childElementCount > 0) {
+return;
+}
 if (rows.length === 0) {
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = viewKey;
+breakdownRenderedSignature = nextSig;
 listEl.innerHTML = `<div class="agy-ta-empty">${activityFetchError ? '无法读取统计数据，请确认主进程已注入最新遥测模块' : '暂无每月消耗记录'}</div>`;
 return;
 }
 const maxTotal = rows.reduce((mx, r) => Math.max(mx, r.total), 0);
-listEl.innerHTML = rows
+nextHtml = rows
 .map((m) => {
 const [yStr, mStr] = m.ym.split('-');
 const label = `${yStr}年${mStr}月`;
@@ -420,9 +471,10 @@ const isCur = m.ym === curYm;
 const periodLabel = label;
 const rowTooltip = buildModelTooltipAttr(periodLabel, m.models);
 const titleAttr = rowTooltip ? ` title="${rowTooltip}"` : '';
+const barKey = `${viewKey}:${m.ym}`;
 const barHtml = activityBreakdownMode === 'model'
-? buildModelProgressHtml(m.models, m.total, maxTotal, palette)
-: buildDualProgressHtml(m.desktop, m.cli, m.total, maxTotal);
+? buildModelProgressHtml(m.models, m.total, maxTotal, palette, barKey, breakdownBarRenderedPct, nextBreakdownBarMap)
+: buildDualProgressHtml(m.desktop, m.cli, m.total, maxTotal, barKey, breakdownBarRenderedPct, nextBreakdownBarMap);
 const leftSubText = `输入 ${formatActivityTokens(m.in)} · 缓存 ${formatActivityTokens(m.cache)} (${calcCachePct(m)}%) · 输出 ${formatActivityTokens(m.out)} · 活跃 ${m.activeDays} 天`;
 const srcSubText = `Desktop ${formatActivityTokens(m.desktop)} · CLI ${formatActivityTokens(m.cli)}`;
 const rightSubHtml = activityBreakdownMode === 'model'
@@ -467,6 +519,10 @@ const convText = Number(all.totalConversations) > 0
 const allModels = all.models || {};
 const modelEntries = getSortedModelEntries(allModels);
 const totalModelSum = modelEntries.reduce((sum, [, m]) => sum + (Number(m && m.total) || 0), 0) || Number(all.total) || 0;
+nextSig = `${viewKey}|${Number(all.total) || 0}:${allIn}:${allCache}:${allOut}:${allDesktop}:${allCli}:${Number(all.activeDays) || 0}:${Number(all.totalConversations) || 0}:${Number(all.steps) || 0}|${buildModelsSig(allModels)}`;
+if (viewKey === breakdownRenderedViewKey && nextSig === breakdownRenderedSignature && listEl.childElementCount > 0) {
+return;
+}
 
 let modelPanelHtml = '';
 if (modelEntries.length === 0) {
@@ -479,11 +535,12 @@ modelPanelHtml = `
 }
 else {
 const modelPanelTitle = `各模型累计消耗分布（共 ${modelEntries.length} 个模型）`;
+const modelsAllAnim = resolveBreakdownBarAnim('total:models:all', totalModelSum > 0 ? 100 : 0, breakdownBarRenderedPct, nextBreakdownBarMap);
 modelPanelHtml = `
 <div class="agy-ta-panel">
 <div class="agy-ta-panel-title" title="${escHtml(modelPanelTitle)}">${escHtml(modelPanelTitle)}</div>
 <div class="agy-ta-bar-track" style="height:10px;">
-<div class="agy-ta-bar-fill" style="width:100%;">
+<div class="agy-ta-bar-fill" style="width:${modelsAllAnim.initialStr}%;"${modelsAllAnim.targetAttr}>
 ${modelEntries.map(([name, m]) => {
 const mTot = Number(m && m.total) || 0;
 const pct = totalModelSum > 0 ? (mTot / totalModelSum) * 100 : 0;
@@ -504,6 +561,7 @@ const mPromptDenom = mIn + mCache;
 const mCacheRate = mPromptDenom > 0 ? ((mCache / mPromptDenom) * 100).toFixed(1) : '0.0';
 const stepsPart = m.steps ? ` · ${m.steps} 步` : '';
 const metaText = `输入 ${formatActivityTokens(mIn)} · 缓存 ${formatActivityTokens(mCache)} (${mCacheRate}%) · 输出 ${formatActivityTokens(mOut)}${stepsPart}`;
+const modelBarAnim = resolveBreakdownBarAnim(`total:model:${name}`, pct, breakdownBarRenderedPct, nextBreakdownBarMap);
 return `
 <div class="agy-ta-model-item">
 <div class="agy-ta-model-row-head">
@@ -511,7 +569,7 @@ return `
 <span class="agy-ta-comp-val">${formatActivityTokens(mTot)} (${pct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${pct.toFixed(2)}%; background:${col};"></div>
+<div class="agy-ta-comp-fill" style="width:${modelBarAnim.initialStr}%; background:${col};"${modelBarAnim.targetAttr}></div>
 </div>
 <div class="agy-ta-model-meta" title="${escHtml(metaText)}">
 ${escHtml(metaText)}
@@ -524,9 +582,13 @@ ${escHtml(metaText)}
 `;
 }
 
+const inAnim = resolveBreakdownBarAnim('total:comp:in', inPct, breakdownBarRenderedPct, nextBreakdownBarMap);
+const cacheAnim = resolveBreakdownBarAnim('total:comp:cache', cacheCompPct, breakdownBarRenderedPct, nextBreakdownBarMap);
+const outAnim = resolveBreakdownBarAnim('total:comp:out', outPct, breakdownBarRenderedPct, nextBreakdownBarMap);
+const srcAllAnim = resolveBreakdownBarAnim('total:src:all', srcSum > 0 ? 100 : 0, breakdownBarRenderedPct, nextBreakdownBarMap);
 const tokPanelTitle = `Token 类型构成（共 ${formatActivityTokens(all.total)}）`;
 const srcPanelTitle = `端侧来源分布 · ${Number(all.activeDays) || 0} 活跃天`;
-listEl.innerHTML = `
+nextHtml = `
 <div class="agy-ta-total-grid">
 <div class="agy-ta-panel">
 <div class="agy-ta-panel-title" title="${escHtml(tokPanelTitle)}">${escHtml(tokPanelTitle)}</div>
@@ -536,7 +598,7 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allIn)} (${inPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${inPct.toFixed(2)}%; background:var(--agy-ta-tok-in, #A78BFA);"></div>
+<div class="agy-ta-comp-fill" style="width:${inAnim.initialStr}%; background:var(--agy-ta-tok-in, #A78BFA);"${inAnim.targetAttr}></div>
 </div>
 </div>
 <div class="agy-ta-comp-item">
@@ -545,7 +607,7 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allCache)} (${cacheCompPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${cacheCompPct.toFixed(2)}%; background:var(--agy-ta-desktop-color, #D965B5);"></div>
+<div class="agy-ta-comp-fill" style="width:${cacheAnim.initialStr}%; background:var(--agy-ta-desktop-color, #D965B5);"${cacheAnim.targetAttr}></div>
 </div>
 </div>
 <div class="agy-ta-comp-item">
@@ -554,14 +616,14 @@ listEl.innerHTML = `
 <span class="agy-ta-comp-val">${formatActivityTokens(allOut)} (${outPct.toFixed(1)}%)</span>
 </div>
 <div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${outPct.toFixed(2)}%; background:var(--agy-ta-tok-out, #34D399);"></div>
+<div class="agy-ta-comp-fill" style="width:${outAnim.initialStr}%; background:var(--agy-ta-tok-out, #34D399);"${outAnim.targetAttr}></div>
 </div>
 </div>
 </div>
 <div class="agy-ta-panel">
 <div class="agy-ta-panel-title" title="${escHtml(srcPanelTitle)}">${escHtml(srcPanelTitle)}</div>
 <div class="agy-ta-bar-track" style="height:10px;">
-<div class="agy-ta-bar-fill" style="width:${srcSum > 0 ? 100 : 0}%;">
+<div class="agy-ta-bar-fill" style="width:${srcAllAnim.initialStr}%;"${srcAllAnim.targetAttr}>
 <div class="agy-ta-seg-desktop" style="width:${desktopPct.toFixed(2)}%;"></div>
 <div class="agy-ta-seg-cli" style="width:${cliPct.toFixed(2)}%;"></div>
 </div>
@@ -586,6 +648,31 @@ listEl.innerHTML = `
 </div>
 ${modelPanelHtml}
 `;
+}
+listEl.innerHTML = nextHtml;
+breakdownBarRenderedPct.clear();
+for (const [k, v] of nextBreakdownBarMap.entries()) {
+breakdownBarRenderedPct.set(k, v);
+}
+breakdownRenderedViewKey = viewKey;
+breakdownRenderedSignature = nextSig;
+const pendingBreakdownBars = listEl.querySelectorAll('[data-target-width]');
+if (pendingBreakdownBars.length > 0) {
+const applyBreakdownBars = () => {
+for (const bar of pendingBreakdownBars) {
+const tw = bar.getAttribute('data-target-width');
+if (tw !== null) {
+bar.style.width = tw;
+bar.removeAttribute('data-target-width');
+}
+}
+};
+if (typeof g.requestAnimationFrame === 'function') {
+g.requestAnimationFrame(() => g.requestAnimationFrame(applyBreakdownBars));
+}
+else {
+setTimeout(applyBreakdownBars, 16);
+}
 }
 listEl.scrollTop = prevScroll;
 }
@@ -721,7 +808,7 @@ return `
 </div>
 `;
 }
-function renderPoolRowHtml(acctId, group, idx, ringPrevMap, ringNextMap, hasAnyDual) {
+function renderPoolRowHtml(acctId, group, idx, ringPrevMap, ringNextMap, hasAnyDual, barPrevMap, barNextMap) {
 const buckets = Array.isArray(group && group.buckets) ? group.buckets : [];
 if (buckets.length === 0) {
 return '';
@@ -740,6 +827,13 @@ const showReset = Boolean(resetShort && pct !== null && pct < 100);
 const barTip = `${fullName} (${winLabel})：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
 const fillColor = getQuotaBarColor(pct);
 const widthPct = pct !== null ? pct : 0;
+const barKey = `${acctId}:${idx}:${primary.window || primary.label || 'primary'}`;
+const prevBarPct = barPrevMap && typeof barPrevMap.get === 'function' ? barPrevMap.get(barKey) : undefined;
+if (barNextMap && typeof barNextMap.set === 'function' && pct !== null) {
+barNextMap.set(barKey, pct);
+}
+const shouldAnimateBar = pct !== null && ((prevBarPct === undefined && pct > 0) || (prevBarPct !== undefined && prevBarPct !== pct));
+const initialBarWidth = shouldAnimateBar ? (prevBarPct !== undefined ? prevBarPct : 0) : widthPct;
 const resetHtml = showReset
 ? `<span class="agy-ta-pool-reset${isDepleted ? ' is-depleted' : ''}">· ${escHtml(resetShort)}</span>`
 : '';
@@ -780,7 +874,7 @@ ${resetHtml}
 </span>
 <span class="agy-ta-pool-pct${isDepleted ? ' is-depleted' : ''}">${escHtml(pct !== null ? `${pct}%` : '—')}</span>
 </div>
-<div class="agy-ta-pool-track"><div class="agy-ta-pool-fill" style="width:${widthPct}%; background:${fillColor};"></div></div>
+<div class="agy-ta-pool-track"><div class="agy-ta-pool-fill" style="width:${initialBarWidth}%; background:${fillColor};"${shouldAnimateBar ? ` data-target-width="${widthPct}%"` : ''}></div></div>
 </div>
 <div class="agy-ta-pool-ring-col">${ringColHtml}</div>
 ${longResetColHtml}
@@ -805,12 +899,9 @@ function syncAccountsChromeAndVisibility() {
 if (!activityOverlayEl) {
 return;
 }
-if (!accountsAvailable && activityActiveTab === 'accounts') {
-activityActiveTab = 'daily';
-}
 const acctTabBtn = activityOverlayEl.querySelector('[data-role="ta-tab-accounts"]');
 if (acctTabBtn) {
-acctTabBtn.hidden = !accountsAvailable;
+acctTabBtn.hidden = false;
 }
 const acctPill = activityOverlayEl.querySelector('[data-role="ta-acct-pill"]');
 if (acctPill) {
@@ -826,7 +917,7 @@ else {
 acctPill.hidden = true;
 }
 }
-const isAccountsView = accountsAvailable && activityActiveTab === 'accounts';
+const isAccountsView = activityActiveTab === 'accounts';
 const kpisEl = activityOverlayEl.querySelector('.agy-ta-kpis');
 const heatmapEl = activityOverlayEl.querySelector('.agy-ta-heatmap-section');
 const breakdownEl = activityOverlayEl.querySelector('.agy-ta-breakdown-section');
@@ -888,7 +979,7 @@ if (!activityOverlayEl) {
 return;
 }
 syncAccountsChromeAndVisibility();
-if (!accountsAvailable) {
+if (activityActiveTab !== 'accounts') {
 return;
 }
 const setRoleText = (role, txt, titleText) => {
@@ -900,21 +991,85 @@ el.title = titleText;
 }
 }
 };
-const activeAcct = accountsList.find((a) => a && (a.isCurrent || (accountsCurrentId && a.id === accountsCurrentId))) || null;
-const readyAccts = accountsList.filter((a) => a && !a.disabled && !a.validationBlocked);
-const unavailableCount = Math.max(0, accountsList.length - readyAccts.length);
+const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
+const addBtn = activityOverlayEl.querySelector('[data-action="acct-add"]');
+const syncBtn = activityOverlayEl.querySelector('[data-action="acct-sync-live"]');
+const refreshBtn = activityOverlayEl.querySelector('[data-action="acct-refresh"]');
+const noticeEl = activityOverlayEl.querySelector('[data-role="ta-acct-notice"]');
+const listEl = activityOverlayEl.querySelector('[data-role="ta-acct-list"]');
+if (!accountsAvailable) {
+setRoleText('acct-kpi-current-val', '--', '账号引擎尚未就绪');
+setRoleText('acct-kpi-count-val', '0', '账号引擎尚未就绪');
+setRoleText('acct-kpi-5h-val', '--', '部署 agy-switch 引擎后可用');
+setRoleText('acct-kpi-week-val', '--', '部署 agy-switch 引擎后可用');
+if (metaEl) {
+metaEl.textContent = accountsLoading ? '正在检测账号引擎...' : '引擎未部署';
+}
+if (addBtn) {
+addBtn.disabled = true;
+addBtn.textContent = '+ 添加账号';
+}
+if (syncBtn) {
+syncBtn.hidden = true;
+}
+if (refreshBtn) {
+refreshBtn.disabled = true;
+refreshBtn.textContent = '刷新额度';
+}
+if (noticeEl) {
+if (accountsErrorMsg) {
+noticeEl.className = 'agy-ta-acct-notice is-error';
+noticeEl.innerHTML = `<span class="agy-ta-acct-notice-text">${escHtml(accountsErrorMsg)}</span>`;
+noticeEl.hidden = false;
+}
+else {
+noticeEl.innerHTML = '';
+noticeEl.hidden = true;
+}
+}
+if (listEl) {
+const unavailSig = accountsLoading ? 'unavail:loading' : 'unavail:missing';
+if (unavailSig !== accountsRenderedListSignature || listEl.childElementCount === 0) {
+accountsRenderedListSignature = unavailSig;
+listEl.innerHTML = accountsLoading
+? `<div class="agy-ta-empty">正在检测本地账号引擎与账号列表...</div>`
+: `
+<div class="agy-ta-empty">
+<div class="agy-ta-empty-title">未检测到内置账号管理引擎 (agy-switch.exe)</div>
+<div class="agy-ta-empty-desc">
+重新双击运行 <span class="agy-ta-empty-code">Antigravity-Telemetry-Installer.bat</span> 即可自动从 GitHub Releases 下载并部署（无需编译 Rust）；<br/>
+也可手动下载 <span class="agy-ta-empty-code">agy-switch-windows-x64.exe</span> 重命名为 <span class="agy-ta-empty-code">agy-switch.exe</span> 放入 <span class="agy-ta-empty-code">%LOCALAPPDATA%\\agy-switch\\</span> 后点击下方检测。
+</div>
+<div class="agy-ta-empty-actions">
+<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-redetect">重新检测引擎</button>
+<button type="button" class="agy-ta-acct-btn" data-action="acct-open-releases">打开 GitHub Releases</button>
+</div>
+</div>
+`;
+}
+}
+return;
+}
+const orderedAccounts = accountsList.slice().sort((a, b) => {
+const aCur = Boolean(a && (a.isCurrent || (accountsCurrentId && a.id === accountsCurrentId)));
+const bCur = Boolean(b && (b.isCurrent || (accountsCurrentId && b.id === accountsCurrentId)));
+return Number(bCur) - Number(aCur);
+});
+const activeAcct = orderedAccounts.find((a) => a && (a.isCurrent || (accountsCurrentId && a.id === accountsCurrentId))) || null;
+const readyAccts = orderedAccounts.filter((a) => a && !a.disabled && !a.validationBlocked);
+const unavailableCount = Math.max(0, orderedAccounts.length - readyAccts.length);
 if (activeAcct) {
 const curTitle = activeAcct.label || activeAcct.email || activeAcct.name || activeAcct.id;
 const curPlan = activeAcct.plan && activeAcct.plan !== 'UNKNOWN' ? ` · ${activeAcct.plan}` : '';
 setRoleText('acct-kpi-current-val', `${curTitle}${curPlan}`, `当前登录：${activeAcct.email || curTitle}${curPlan}`);
 }
 else {
-setRoleText('acct-kpi-current-val', accountsList.length > 0 ? '未匹配' : '--', '当前未检测到已匹配的激活账号');
+setRoleText('acct-kpi-current-val', orderedAccounts.length > 0 ? '未匹配' : '--', '当前未检测到已匹配的激活账号');
 }
-const countText = accountsList.length === 0
+const countText = orderedAccounts.length === 0
 ? '0'
-: `${accountsList.length} (${readyAccts.length} 可用${unavailableCount > 0 ? ` / ${unavailableCount} 受限` : ''})`;
-setRoleText('acct-kpi-count-val', countText, `共 ${accountsList.length} 个已保存账号，${readyAccts.length} 个可用`);
+: `${orderedAccounts.length} (${readyAccts.length} 可用${unavailableCount > 0 ? ` / ${unavailableCount} 受限` : ''})`;
+setRoleText('acct-kpi-count-val', countText, `共 ${orderedAccounts.length} 个已保存账号，${readyAccts.length} 个可用`);
 
 let best5h = null;
 let bestWeek = null;
@@ -942,17 +1097,11 @@ bestWeek = { pct: pw, who };
 setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--', best5h ? `最高可用短周期额度：${best5h.who} (${best5h.pct}%)` : '点击刷新额度获取');
 setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--', bestWeek ? `最高可用长周期额度：${bestWeek.who} (${bestWeek.pct}%)` : '点击刷新额度获取');
 
-const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
-const addBtn = activityOverlayEl.querySelector('[data-action="acct-add"]');
-const syncBtn = activityOverlayEl.querySelector('[data-action="acct-sync-live"]');
-const refreshBtn = activityOverlayEl.querySelector('[data-action="acct-refresh"]');
-const noticeEl = activityOverlayEl.querySelector('[data-role="ta-acct-notice"]');
-const listEl = activityOverlayEl.querySelector('[data-role="ta-acct-list"]');
 const anyBusy = Boolean(accountsSwitchingId || accountsDeletingId);
 const isAdding = accountsAddState !== 'idle';
 if (metaEl) {
 let latestTs = 0;
-for (const a of accountsList) {
+for (const a of orderedAccounts) {
 if (a && Number(a.lastUpdated) > latestTs) {
 latestTs = Number(a.lastUpdated);
 }
@@ -960,7 +1109,7 @@ latestTs = Number(a.lastUpdated);
 const agoTxt = formatUpdatedAgo(latestTs);
 metaEl.textContent = accountsLoading
 ? '读取本地账号列表...'
-: `共 ${accountsList.length} 个${agoTxt ? ` · ${agoTxt}` : ''}`;
+: `共 ${orderedAccounts.length} 个${agoTxt ? ` · ${agoTxt}` : ''}`;
 }
 if (addBtn) {
 addBtn.disabled = anyBusy || accountsAddState === 'starting' || accountsAddState === 'finalizing';
@@ -1029,21 +1178,39 @@ if (!listEl) {
 return;
 }
 const prevScroll = listEl.scrollTop;
-if (accountsLoading && accountsList.length === 0) {
+if (accountsLoading && orderedAccounts.length === 0) {
+const loadingSig = 'avail:loading';
+if (loadingSig !== accountsRenderedListSignature || listEl.childElementCount === 0) {
+accountsRenderedListSignature = loadingSig;
 listEl.innerHTML = `<div class="agy-ta-empty">正在读取本地账号缓存...</div>`;
+}
 return;
 }
-if (accountsList.length === 0) {
+if (orderedAccounts.length === 0) {
+const emptySig = `avail:empty:${anyBusy ? 1 : 0}:${isAdding ? 1 : 0}`;
+if (emptySig !== accountsRenderedListSignature || listEl.childElementCount === 0) {
+accountsRenderedListSignature = emptySig;
 listEl.innerHTML = `
 <div class="agy-ta-empty">
 <div>尚未添加任何账号，点击下方按钮通过浏览器完成 Google 登录授权</div>
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add"${(anyBusy || isAdding) ? ' disabled' : ''}>${isAdding ? '等待浏览器授权...' : '+ 添加第一个账号'}</button>
 </div>
 `;
+}
 return;
 }
+const listSig = `${accountsSwitchingId || ''}|${accountsDeletingId || ''}|${accountsPendingConfirmId || ''}|${accountsPendingConfirmType || ''}|${accountsCurrentId || ''}|` + orderedAccounts.map((a) => {
+const grps = resolveDynamicQuotaGroups(a.quota);
+const gSig = grps.map((gr) => `${gr.shortName}:${(gr.buckets || []).map((b) => `${b.window}=${b.pct}@${b.resetTime || ''}`).join(',')}`).join('/');
+return `${a.id}:${a.email || ''}:${a.label || ''}:${a.plan || ''}:${a.isCurrent ? 1 : 0}:${a.disabled ? 1 : 0}:${a.validationBlocked ? 1 : 0}:${a.isForbidden ? 1 : 0}:${gSig}`;
+}).join(';');
+if (listSig === accountsRenderedListSignature && listEl.childElementCount > 0) {
+return;
+}
+accountsRenderedListSignature = listSig;
 const nextRingPctMap = new Map();
-listEl.innerHTML = accountsList.map((acct) => {
+const nextBarPctMap = new Map();
+listEl.innerHTML = orderedAccounts.map((acct) => {
 const isCurrent = Boolean(acct.isCurrent || (accountsCurrentId && acct.id === accountsCurrentId));
 const isUnavailable = Boolean(acct.disabled || acct.validationBlocked);
 const isSwitchingThis = accountsSwitchingId === acct.id;
@@ -1097,7 +1264,7 @@ actionHtml = `<button type="button" class="agy-ta-acct-btn" data-action="acct-sw
 const dynGroups = resolveDynamicQuotaGroups(acct.quota);
 const hasAnyDual = dynGroups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 1);
 const poolsHtml = dynGroups.length > 0
-? dynGroups.map((grp, idx) => renderPoolRowHtml(acct.id, grp, idx, accountsRingRenderedPct, nextRingPctMap, hasAnyDual)).join('')
+? dynGroups.map((grp, idx) => renderPoolRowHtml(acct.id, grp, idx, accountsRingRenderedPct, nextRingPctMap, hasAnyDual, accountsBarRenderedPct, nextBarPctMap)).join('')
 : `<div class="agy-ta-acct-no-quota">${acct.isForbidden ? '当前账号配额接口受限' : '暂无配额缓存，点击上方「刷新额度」获取'}</div>`;
 return `
 <div class="agy-ta-row agy-ta-acct-row${isCurrent ? ' is-active' : ''}${isUnavailable ? ' is-disabled' : ''}">
@@ -1121,9 +1288,14 @@ accountsRingRenderedPct.clear();
 for (const [k, v] of nextRingPctMap.entries()) {
 accountsRingRenderedPct.set(k, v);
 }
+accountsBarRenderedPct.clear();
+for (const [k, v] of nextBarPctMap.entries()) {
+accountsBarRenderedPct.set(k, v);
+}
 const pendingRings = listEl.querySelectorAll('.agy-ta-ring-arc[data-target-offset]');
-if (pendingRings.length > 0) {
-const applyRings = () => {
+const pendingBars = listEl.querySelectorAll('.agy-ta-pool-fill[data-target-width]');
+if (pendingRings.length > 0 || pendingBars.length > 0) {
+const applyAnimations = () => {
 for (const arc of pendingRings) {
 const targetOff = arc.getAttribute('data-target-offset');
 if (targetOff !== null) {
@@ -1131,12 +1303,19 @@ arc.setAttribute('stroke-dashoffset', targetOff);
 arc.removeAttribute('data-target-offset');
 }
 }
+for (const bar of pendingBars) {
+const targetWidth = bar.getAttribute('data-target-width');
+if (targetWidth !== null) {
+bar.style.width = targetWidth;
+bar.removeAttribute('data-target-width');
+}
+}
 };
 if (typeof g.requestAnimationFrame === 'function') {
-g.requestAnimationFrame(() => g.requestAnimationFrame(applyRings));
+g.requestAnimationFrame(() => g.requestAnimationFrame(applyAnimations));
 }
 else {
-setTimeout(applyRings, 16);
+setTimeout(applyAnimations, 16);
 }
 }
 listEl.scrollTop = prevScroll;
@@ -1181,6 +1360,7 @@ accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 stopAccountAddFlow(false);
 renderActivityModalData();
+renderAccountsSection();
 return;
 }
 if (Array.isArray(res.capabilities)) {
@@ -1648,6 +1828,11 @@ accountsRefreshing = false;
 accountsSyncing = false;
 accountsAutoSyncedOnce = false;
 accountsRingRenderedPct.clear();
+accountsBarRenderedPct.clear();
+accountsRenderedListSignature = '';
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = '';
+breakdownRenderedSignature = '';
 accountsErrorMsg = '';
 accountsStatusMsg = '';
 stopAccountAddFlow(true);
@@ -1738,7 +1923,7 @@ overlay.innerHTML = `
 <button type="button" class="agy-ta-tab" data-tab="weekly">每周</button>
 <button type="button" class="agy-ta-tab" data-tab="monthly">每月</button>
 <button type="button" class="agy-ta-tab" data-tab="total">累计总量</button>
-<button type="button" class="agy-ta-tab" data-tab="accounts" data-role="ta-tab-accounts" hidden>账号</button>
+<button type="button" class="agy-ta-tab" data-tab="accounts" data-role="ta-tab-accounts">账号</button>
 </div>
 <button type="button" class="agy-ta-close" data-role="ta-close" title="关闭 (Esc)">×</button>
 </div>
@@ -1866,6 +2051,12 @@ accountsPendingConfirmType = null;
 activityActiveTab = nextTab;
 renderActivityModalData();
 if (nextTab === 'accounts') {
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = '';
+breakdownRenderedSignature = '';
+accountsRingRenderedPct.clear();
+accountsBarRenderedPct.clear();
+accountsRenderedListSignature = '';
 renderAccountsSection();
 void refreshAccountsList(false);
 }
@@ -1875,11 +2066,17 @@ void refreshAccountsList(false);
 const acctPillBtn = overlay.querySelector('[data-role="ta-acct-pill"]');
 if (acctPillBtn) {
 acctPillBtn.addEventListener('click', () => {
-if (accountsAvailable && activityActiveTab !== 'accounts') {
+if (activityActiveTab !== 'accounts') {
 accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 activityActiveTab = 'accounts';
+breakdownBarRenderedPct.clear();
+breakdownRenderedViewKey = '';
+breakdownRenderedSignature = '';
 renderActivityModalData();
+accountsRingRenderedPct.clear();
+accountsBarRenderedPct.clear();
+accountsRenderedListSignature = '';
 renderAccountsSection();
 void refreshAccountsList(false);
 }
@@ -1913,6 +2110,24 @@ void syncCurrentAccount(true);
 }
 else if (action === 'acct-refresh') {
 void refreshAccountsList(true);
+}
+else if (action === 'acct-redetect') {
+accountsErrorMsg = '';
+accountsStatusMsg = '';
+accountsLoading = true;
+accountsRenderedListSignature = '';
+renderAccountsSection();
+void refreshAccountsList(false);
+}
+else if (action === 'acct-open-releases') {
+if (electronObj && electronObj.ipcRenderer && typeof electronObj.ipcRenderer.invoke === 'function') {
+Promise.resolve(electronObj.ipcRenderer.invoke('telemetry:accounts-open-releases')).then((res) => {
+if (activityModalOpen && res && !res.ok && res.error) {
+accountsErrorMsg = res.error;
+renderAccountsSection();
+}
+}).catch(() => { });
+}
 }
 else if (action === 'acct-switch') {
 const id = actionEl.getAttribute('data-account-id');
@@ -2020,6 +2235,9 @@ g.window.addEventListener('focus', activityFocusHandler);
 activityOverlayEl = overlay;
 (g.document.body || g.document.documentElement).appendChild(overlay);
 renderActivityModalData();
+if (activityActiveTab === 'accounts') {
+renderAccountsSection();
+}
 void refreshActivityModal();
 void refreshAccountsList(false);
 activityRefreshTimer = setInterval(() => {

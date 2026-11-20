@@ -1,0 +1,109 @@
+name: Build & Release agy-switch Engine
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tools/agy-switch-lite/**'
+      - '.github/workflows/release-agy-switch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-agy-switch
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Build Windows x64 (agy-switch)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/agy-switch-lite -> target
+
+      - name: Build release binary
+        working-directory: tools/agy-switch-lite
+        shell: pwsh
+        run: |
+          cargo build --release --locked
+
+      - name: Smoke test & generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = 'tools/agy-switch-lite/target/release/agy-switch.exe'
+          if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+            throw "Expected release binary not found: $bin"
+          }
+          $verJson = & $bin --version --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "agy-switch.exe --version --json exited with $LASTEXITCODE"
+          }
+          Write-Host "Version probe: $verJson"
+          $verObj = $verJson | ConvertFrom-Json
+          if (-not ($verObj.capabilities -contains 'sync')) {
+            throw "Expected 'sync' capability in --version --json output"
+          }
+
+          New-Item -ItemType Directory -Path 'dist' -Force | Out-Null
+          $outBin = 'dist/agy-switch-windows-x64.exe'
+          Copy-Item -LiteralPath $bin -Destination $outBin -Force
+          $hash = (Get-FileHash -LiteralPath $outBin -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $outBin).Length
+          Set-Content -LiteralPath "$outBin.sha256" -Value "$hash  agy-switch-windows-x64.exe" -NoNewline -Encoding Ascii
+          Write-Host "Built $outBin ($size bytes, sha256=$hash)"
+          "BINARY_VERSION=$($verObj.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BINARY_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BINARY_SIZE=$size" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'agy-switch-latest'
+          $shortSha = $env:GITHUB_SHA.Substring(0, 8)
+          $title = "Antigravity Account Engine (agy-switch $env:BINARY_VERSION)"
+          $notes = @(
+            'Automated reproducible build of `tools/agy-switch-lite` on GitHub Actions (`windows-latest`).',
+            '',
+            ("- Commit: ``" + $shortSha + "``"),
+            ("- Version: ``" + $env:BINARY_VERSION + "``"),
+            ("- Size: ``" + $env:BINARY_SIZE + "`` bytes"),
+            ("- SHA-256: ``" + $env:BINARY_SHA256 + "``"),
+            '',
+            'Installed automatically by `Antigravity-Telemetry-Installer.bat` to `%LOCALAPPDATA%\agy-switch\agy-switch.exe`.'
+          ) -join "`n"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f $tag $env:GITHUB_SHA
+          git push origin "refs/tags/$tag" --force
+
+          $releaseExists = $false
+          & gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $releaseExists = $true
+          }
+
+          if ($releaseExists) {
+            & gh release upload $tag 'dist/agy-switch-windows-x64.exe' 'dist/agy-switch-windows-x64.exe.sha256' --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+            & gh release edit $tag --title $title --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
+          } else {
+            & gh release create $tag 'dist/agy-switch-windows-x64.exe' 'dist/agy-switch-windows-x64.exe.sha256' --title $title --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }

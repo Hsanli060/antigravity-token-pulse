@@ -1,6 +1,8 @@
 # agy-switch-lite
 
-轻量级无头 Antigravity 2.0 账号切换与配额同步 CLI（纯 Rust、仅 ~3 MB、无 GUI/TUI/反代冗余模块），可作为 `antigravity-token-pulse` 面板的独立后端引擎使用。
+轻量级无头 Antigravity 2.0 账号切换与配额同步引擎（纯 Rust、仅 ~3 MB、无 GUI/TUI/反代冗余模块），是 `antigravity-token-pulse` 内置的独立进程后端引擎。
+
+> 普通用户无需安装 Rust 或手动编译：双击根目录的 `Antigravity-Telemetry-Installer.bat` 会自动从 GitHub Releases 下载并校验由 GitHub Actions 基于本目录源码构建的预编译二进制至 `%LOCALAPPDATA%\agy-switch\agy-switch.exe`。
 
 ## 安全与隐私设计
 

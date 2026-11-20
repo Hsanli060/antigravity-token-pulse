@@ -757,7 +757,7 @@ days: {},
 }
 });
 
-// --- External Account Switcher CLI Bridge (Optional, Capability-Gated, Zero Credentials) ---
+// --- Built-In Account Switcher CLI Engine Bridge (Process-Isolated, Zero Credentials) ---
 const childProcessTelemetry = require('child_process');
 const SWITCH_ACCOUNT_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 const SWITCH_CLI_CONFIG_FILE = 'telemetry-switch-cli.json';
@@ -1254,6 +1254,7 @@ async function fetchSanitizedAccountsList(cliPath) {
     }
     accounts.push(clean);
   }
+  accounts.sort((a, b) => Number(Boolean(b.isCurrent)) - Number(Boolean(a.isCurrent)));
   return {
     available: true,
     accounts,
@@ -2056,6 +2057,24 @@ electronMain.handle('telemetry:accounts-add-cancel', async (event) => {
     terminateAddSession(s);
   }
   return { ok: true, cancelled: true };
+});
+
+const SWITCH_RELEASES_URL = 'https://github.com/Hsanli060/antigravity-token-pulse/releases/latest';
+electronMain.removeHandler?.('telemetry:accounts-open-releases');
+electronMain.handle('telemetry:accounts-open-releases', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false, error: '拒绝非本地来源请求' };
+  }
+  const shellObj = getElectronShellSafe();
+  if (!shellObj || typeof shellObj.openExternal !== 'function') {
+    return { ok: false, error: '无法调起系统浏览器' };
+  }
+  try {
+    await shellObj.openExternal(SWITCH_RELEASES_URL);
+    return { ok: true, url: SWITCH_RELEASES_URL };
+  } catch {
+    return { ok: false, error: '打开 GitHub Releases 页面失败' };
+  }
 });
 
 electronMain.removeHandler?.('telemetry:accounts-add-open');

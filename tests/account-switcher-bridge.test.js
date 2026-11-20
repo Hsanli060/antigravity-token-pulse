@@ -249,6 +249,7 @@ async function runTests() {
     assert(patchedIpc.includes('telemetry:accounts-add-status'));
     assert(patchedIpc.includes('telemetry:accounts-add-cancel'));
     assert(patchedIpc.includes('telemetry:accounts-add-open'));
+    assert(patchedIpc.includes('telemetry:accounts-open-releases'));
     assert(patchedIpc.includes('telemetry:accounts-delete'));
 
     const preloadCombined = [p1, p2, p3].join('\n');
@@ -263,6 +264,7 @@ async function runTests() {
     assert(patchedPreload.includes('telemetry:accounts-add-status'));
     assert(patchedPreload.includes('telemetry:accounts-add-cancel'));
     assert(patchedPreload.includes('telemetry:accounts-add-open'));
+    assert(patchedPreload.includes('telemetry:accounts-open-releases'));
     assert(patchedPreload.includes('telemetry:accounts-delete'));
   });
 
@@ -331,6 +333,8 @@ async function runTests() {
         assert.strictEqual(r4c.ok, false);
         const r4o = await handlers.get('telemetry:accounts-add-open')(evt);
         assert.strictEqual(r4o.ok, false);
+        const r4r = await handlers.get('telemetry:accounts-open-releases')(evt);
+        assert.strictEqual(r4r.ok, false);
         const r5 = await handlers.get('telemetry:accounts-delete')(evt, 'acct_backup_02');
         assert.strictEqual(r5.ok, false);
       }
@@ -362,7 +366,16 @@ async function runTests() {
             cb(null, JSON.stringify({ name: 'agy-switch', version: '4.10.18' }), '');
             return;
           }
-          cb(null, JSON.stringify(SAMPLE_LIST_PAYLOAD), '');
+          // Return current account in the middle (index 1) to verify IPC stably promotes current account to index 0
+          const unsortedPayload = {
+            ...SAMPLE_LIST_PAYLOAD,
+            accounts: [
+              SAMPLE_LIST_PAYLOAD.accounts[1],
+              SAMPLE_LIST_PAYLOAD.accounts[0],
+              SAMPLE_LIST_PAYLOAD.accounts[2],
+            ],
+          };
+          cb(null, JSON.stringify(unsortedPayload), '');
         },
         spawnImpl: () => { throw new Error('unexpected spawn'); },
       });
@@ -381,6 +394,10 @@ async function runTests() {
       assert.strictEqual(listCall.opts.windowsHide, true);
 
       const main = res.accounts[0];
+      assert.strictEqual(main.id, 'acct_main_01');
+      assert.strictEqual(main.isCurrent, true);
+      assert.strictEqual(res.accounts[1].id, 'acct_backup_02');
+      assert.strictEqual(res.accounts[2].id, 'acct_disabled_03');
       assert.strictEqual(main.plan, 'PRO');
       assert.strictEqual(main.label, 'Main Pro');
       assert.strictEqual(main.quota.fiveHour.pct, 78);
@@ -507,8 +524,15 @@ async function runTests() {
     }
   });
 
-  await runCase('7. Privacy audit: zero hardcoded user paths, personal emails, or OAuth secrets in src/ & tools/', async () => {
-    const files = ['ipc-block.js', 'preload-part1.js', 'preload-part2.js', 'preload-part3.js'].map((f) => path.join(SRC_DIR, f));
+  await runCase('7. Privacy audit: zero hardcoded user paths, personal emails, or OAuth secrets in src/, tools/, installer & workflows', async () => {
+    const files = [
+      ...['ipc-block.js', 'preload-part1.js', 'preload-part2.js', 'preload-part3.js'].map((f) => path.join(SRC_DIR, f)),
+      path.join(REPO_ROOT, 'Antigravity-Telemetry-Installer.bat'),
+    ];
+    const wfPath = path.join(REPO_ROOT, '.github', 'workflows', 'release-agy-switch.yml');
+    if (fs.existsSync(wfPath)) {
+      files.push(wfPath);
+    }
     const liteSrcDir = path.join(REPO_ROOT, 'tools', 'agy-switch-lite', 'src');
     if (fs.existsSync(liteSrcDir)) {
       for (const f of fs.readdirSync(liteSrcDir).filter((x) => x.endsWith('.rs'))) {
@@ -542,29 +566,33 @@ async function runTests() {
     assert.strictEqual(patchAsar.stripPreloadPatch(preOnce).trim(), origPreload.trim());
   });
 
-  await runCase('9. Preload UI helpers, XSS escaping, and default-hidden account switcher markup', async () => {
+  await runCase('9. Preload UI helpers, XSS escaping, always-visible account tab, and animated bar/ring markup', async () => {
     const combined = [readSrc('preload-part1.js'), readSrc('preload-part2.js'), readSrc('preload-part3.js')].join('\n');
-    // Verify modal template defaults account tab, header pill, and accounts section to hidden
-    assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
+    // Verify accounts tab is always visible (built-in core tab), while header pill and accounts section start hidden
+    assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts">账号</button>'));
+    assert(!combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
     assert(combined.includes('data-role="ta-acct-pill" hidden'));
     assert(combined.includes('data-role="ta-accounts-section" hidden'));
-    // Verify inline two-step confirmation, sync-live, and silent browser OAuth controls exist
+    // Verify inline two-step confirmation, sync-live, engine setup actions, and silent browser OAuth controls exist
     assert(combined.includes('data-action="acct-add"'));
     assert(combined.includes('data-action="acct-add-open"'));
     assert(combined.includes('data-action="acct-add-copy"'));
     assert(combined.includes('data-action="acct-add-cancel"'));
+    assert(combined.includes('data-action="acct-redetect"'));
+    assert(combined.includes('data-action="acct-open-releases"'));
     assert(combined.includes('data-action="acct-sync-live" hidden'));
     assert(combined.includes('data-action="acct-switch"'));
     assert(combined.includes('data-action="acct-confirm"'));
     assert(combined.includes('data-action="acct-delete"'));
     assert(combined.includes('data-action="acct-delete-confirm"'));
     assert(combined.includes('data-action="acct-cancel"'));
-    // Verify compact 1-line summary bar + 2-column grid + dynamic pool rows + animated SVG ring classes
+    // Verify compact 1-line summary bar + 2-column grid + dynamic pool rows + animated SVG ring & bar classes
     assert(combined.includes('agy-ta-acct-summary-bar'));
     assert(combined.includes('grid-template-columns: repeat(2, minmax(0, 1fr));'));
     assert(combined.includes('agy-ta-pool-row'));
     assert(combined.includes('agy-ta-ring-arc'));
     assert(combined.includes('agy-ta-pool-only-tag'));
+    assert(combined.includes('data-target-width='));
     // Verify unified fixed panel geometry anchored to Daily view
     assert(combined.includes('width: min(860px, 94vw);'));
     assert(combined.includes('height: min(656px, 90vh);'));
@@ -577,17 +605,35 @@ async function runTests() {
     // Verify helper functions execute cleanly in an isolated VM context
     const fnStart = combined.indexOf('function escHtml(');
     const fnEnd = combined.indexOf('function calcCachePct(');
+    const bStart = combined.indexOf('function resolveBreakdownBarAnim(');
+    const bEnd = combined.indexOf('function buildModelSubHtml(');
     const qStart = combined.indexOf('function formatResetCountdown(');
     const qEnd = combined.indexOf('function syncAccountsChromeAndVisibility(');
-    assert(fnStart > 0 && fnEnd > fnStart && qStart > 0 && qEnd > qStart);
+    assert(fnStart > 0 && fnEnd > fnStart && bStart > 0 && bEnd > bStart && qStart > 0 && qEnd > qStart);
     const helperCtx = vm.createContext({ Date, Math, Number, String, Array, Map });
-    new vm.Script(combined.slice(fnStart, fnEnd) + '\n' + combined.slice(qStart, qEnd)).runInContext(helperCtx);
+    new vm.Script(
+      combined.slice(fnStart, fnEnd) + '\n' +
+      combined.slice(bStart, bEnd) + '\n' +
+      combined.slice(qStart, qEnd)
+    ).runInContext(helperCtx);
+    // Breakdown bar fast->slow animation helper check (0% -> target on first render, no replay when unchanged)
+    const bdPrev = new Map();
+    const bdNext = new Map();
+    const firstBar = helperCtx.resolveBreakdownBarAnim('daily:source:2026-11-20', 64.5, bdPrev, bdNext);
+    assert.strictEqual(firstBar.initialStr, '0.00');
+    assert.strictEqual(firstBar.targetAttr, ' data-target-width="64.50%"');
+    const sameBar = helperCtx.resolveBreakdownBarAnim('daily:source:2026-11-20', 64.5, bdNext, new Map());
+    assert.strictEqual(sameBar.initialStr, '64.50');
+    assert.strictEqual(sameBar.targetAttr, '');
+    const movedBar = helperCtx.resolveBreakdownBarAnim('daily:source:2026-11-20', 80.0, bdNext, new Map());
+    assert.strictEqual(movedBar.initialStr, '64.50');
+    assert.strictEqual(movedBar.targetAttr, ' data-target-width="80.00%"');
     // XSS escaping check
     const html = helperCtx.renderQuotaBarHtml('<img src=x onerror=1>', { pct: 65, resetTime: new Date(Date.now() + 7500000).toISOString() });
     assert(html.includes('&lt;img src=x onerror=1&gt;'));
     assert(!html.includes('<img '));
     assert(html.includes('65%'));
-    // Dual-window pool renders left short bar + right animated SVG ring with XX% inside & W1 3-o'clock weekly reset
+    // Dual-window pool renders left animated bar + right animated SVG ring with XX% inside & W1 3-o'clock weekly reset
     const futureShort = new Date(Date.now() + 17400000).toISOString();
     const futureWeek = new Date(Date.now() + 4 * 86400000).toISOString();
     const dualHtml = helperCtx.renderPoolRowHtml('acct1', {
@@ -597,10 +643,11 @@ async function runTests() {
         { window: '5h', label: '5h', pct: 78, resetTime: futureShort },
         { window: 'weekly', label: '周', pct: 93, resetTime: futureWeek },
       ],
-    }, 0, new Map(), new Map(), true);
+    }, 0, new Map(), new Map(), true, new Map(), new Map());
     assert(dualHtml.includes('agy-ta-pool-row'));
     assert(dualHtml.includes('agy-ta-ring-arc'));
     assert(dualHtml.includes('data-target-offset='));
+    assert(dualHtml.includes('data-target-width="78%"'));
     assert(dualHtml.includes('>93%<'));
     assert(dualHtml.includes('agy-ta-pool-reset')); // < 100% shows short countdown
     assert(dualHtml.includes('agy-ta-pool-long-reset')); // W1 shows weekly reset at 3 o'clock when < 100%

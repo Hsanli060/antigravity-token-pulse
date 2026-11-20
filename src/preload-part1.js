@@ -333,6 +333,7 @@ box-sizing: border-box;
 --agy-ta-card-bg: #22222C;
 --agy-ta-card-border: rgba(255, 255, 255, 0.1);
 --agy-ta-card-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+--agy-ta-elev-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 --agy-ta-title: #F4F4FA;
 --agy-ta-badge-bg: rgba(186, 74, 152, 0.16);
 --agy-ta-badge-fg: #F6A5D8;
@@ -348,8 +349,8 @@ box-sizing: border-box;
 --agy-ta-close-fg: #91919C;
 --agy-ta-close-hover-bg: rgba(255, 255, 255, 0.09);
 --agy-ta-close-hover-fg: #FFFFFF;
---agy-ta-kpi-bg: rgba(255, 255, 255, 0.03);
---agy-ta-kpi-border: rgba(255, 255, 255, 0.06);
+--agy-ta-kpi-bg: rgba(255, 255, 255, 0.055);
+--agy-ta-kpi-border: rgba(255, 255, 255, 0.09);
 --agy-ta-kpi-label: #8E8E9E;
 --agy-ta-kpi-val: #F4F4FA;
 --agy-ta-kpi-sub: #7E7E8E;
@@ -368,16 +369,16 @@ box-sizing: border-box;
 --agy-ta-model-name-fg: #E2E2EC;
 --agy-ta-model-meta-fg: #9A9AA8;
 --agy-ta-scrollbar: rgba(255, 255, 255, 0.14);
---agy-ta-row-bg: rgba(255, 255, 255, 0.025);
---agy-ta-row-border: rgba(255, 255, 255, 0.05);
+--agy-ta-row-bg: rgba(255, 255, 255, 0.052);
+--agy-ta-row-border: rgba(255, 255, 255, 0.085);
 --agy-ta-row-name-fg: #E2E2EC;
 --agy-ta-tag-bg: rgba(246, 165, 216, 0.14);
 --agy-ta-tag-fg: #F6A5D8;
 --agy-ta-row-total-fg: #F4F4FA;
---agy-ta-track-bg: rgba(255, 255, 255, 0.06);
+--agy-ta-track-bg: rgba(255, 255, 255, 0.07);
 --agy-ta-row-sub-fg: #848494;
---agy-ta-panel-bg: rgba(255, 255, 255, 0.025);
---agy-ta-panel-border: rgba(255, 255, 255, 0.06);
+--agy-ta-panel-bg: rgba(255, 255, 255, 0.052);
+--agy-ta-panel-border: rgba(255, 255, 255, 0.085);
 --agy-ta-panel-title-fg: #D4D4E2;
 --agy-ta-comp-head-fg: #A2A2B2;
 --agy-ta-comp-val-fg: #EAEAF4;
@@ -401,7 +402,7 @@ box-sizing: border-box;
 --agy-ta-q-warn: #FBBF24;
 --agy-ta-q-low: #FB7185;
 --agy-ta-ring-track: rgba(255, 255, 255, 0.12);
---agy-ta-acct-active-bg: rgba(186, 74, 152, 0.08);
+--agy-ta-acct-active-bg: rgba(186, 74, 152, 0.11);
 --agy-ta-btn-bg: rgba(255, 255, 255, 0.05);
 --agy-ta-btn-border: rgba(255, 255, 255, 0.12);
 --agy-ta-btn-fg: #D4D4E2;
@@ -434,6 +435,7 @@ user-select: none;
 --agy-ta-card-bg: #FFFFFF;
 --agy-ta-card-border: rgba(15, 23, 42, 0.12);
 --agy-ta-card-shadow: 0 20px 50px rgba(15, 23, 42, 0.16), 0 2px 8px rgba(15, 23, 42, 0.08);
+--agy-ta-elev-shadow: none;
 --agy-ta-title: #111827;
 --agy-ta-badge-bg: rgba(22, 163, 74, 0.12);
 --agy-ta-badge-fg: #15803D;
@@ -665,6 +667,7 @@ border: 1px solid var(--agy-ta-kpi-border);
 border-radius: 10px;
 padding: 11px 13px;
 min-width: 0;
+box-shadow: var(--agy-ta-elev-shadow);
 }
 #${MODAL_ID} .agy-ta-kpi-label {
 display: flex;
@@ -966,6 +969,7 @@ flex-direction: column;
 gap: 6px;
 min-width: 0;
 flex-shrink: 0;
+box-shadow: var(--agy-ta-elev-shadow);
 }
 #${MODAL_ID} .agy-ta-row-top {
 display: flex;
@@ -1015,7 +1019,7 @@ height: 100%;
 display: flex;
 border-radius: 999px;
 overflow: hidden;
-transition: width 0.25s ease;
+transition: width 1.55s cubic-bezier(0.22, 0.85, 0.32, 1);
 }
 #${MODAL_ID} .agy-ta-seg-desktop {
 height: 100%;
@@ -1082,6 +1086,7 @@ flex-direction: column;
 gap: 10px;
 min-width: 0;
 flex-shrink: 0;
+box-shadow: var(--agy-ta-elev-shadow);
 }
 #${MODAL_ID} .agy-ta-panel-title {
 font-size: 12px;
@@ -1155,6 +1160,7 @@ flex-shrink: 0;
 #${MODAL_ID} .agy-ta-comp-fill {
 height: 100%;
 border-radius: 999px;
+transition: width 1.55s cubic-bezier(0.22, 0.85, 0.32, 1);
 }
 #${MODAL_ID} .agy-ta-empty {
 flex: 1 1 auto;
@@ -1168,6 +1174,35 @@ padding: 24px 16px;
 color: var(--agy-ta-muted);
 font-size: 12px;
 line-height: 1.5;
+}
+#${MODAL_ID} .agy-ta-empty-title {
+font-size: 13px;
+font-weight: 600;
+color: var(--agy-ta-panel-title-fg);
+}
+#${MODAL_ID} .agy-ta-empty-desc {
+max-width: 460px;
+font-size: 11.5px;
+color: var(--agy-ta-muted);
+line-height: 1.6;
+}
+#${MODAL_ID} .agy-ta-empty-code {
+font-family: Consolas, "Cascadia Mono", monospace;
+font-size: 11px;
+padding: 2px 6px;
+border-radius: 4px;
+background: var(--agy-ta-tabs-bg);
+border: 1px solid var(--agy-ta-tabs-border);
+color: var(--agy-ta-fg);
+user-select: text;
+}
+#${MODAL_ID} .agy-ta-empty-actions {
+display: inline-flex;
+align-items: center;
+gap: 8px;
+flex-wrap: wrap;
+justify-content: center;
+margin-top: 2px;
 }
 #${MODAL_ID} .agy-ta-acct-pill {
 display: inline-flex;
@@ -1621,7 +1656,7 @@ overflow: hidden;
 #${MODAL_ID} .agy-ta-pool-fill {
 height: 100%;
 border-radius: 999px;
-transition: width 0.38s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.25s ease;
+transition: width 1.6s cubic-bezier(0.22, 0.85, 0.32, 1), background-color 0.3s ease;
 }
 #${MODAL_ID} .agy-ta-pool-ring-col {
 display: flex;
@@ -1658,7 +1693,7 @@ stroke-width: 2.4;
 fill: none;
 stroke-width: 2.4;
 stroke-linecap: round;
-transition: stroke-dashoffset 0.48s cubic-bezier(0.4, 0, 0.2, 1), stroke 0.25s ease;
+transition: stroke-dashoffset 1.7s cubic-bezier(0.22, 0.85, 0.32, 1), stroke 0.3s ease;
 }
 #${MODAL_ID} .agy-ta-ring-val {
 position: absolute;
@@ -2062,6 +2097,11 @@ let accountsRefreshing = false;
 let accountsSyncing = false;
 let accountsAutoSyncedOnce = false;
 const accountsRingRenderedPct = new Map();
+const accountsBarRenderedPct = new Map();
+let accountsRenderedListSignature = '';
+const breakdownBarRenderedPct = new Map();
+let breakdownRenderedViewKey = '';
+let breakdownRenderedSignature = '';
 let accountsSwitchingId = null;
 let accountsDeletingId = null;
 let accountsPendingConfirmId = null;

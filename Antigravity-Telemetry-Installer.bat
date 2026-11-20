@@ -746,11 +746,191 @@ function Show-IdeDistinctionNotice([string[]]$ideDirs) {
     Write-Host "       本桌面端 ASAR 注入仅适用于 Antigravity 2.0；若你同时使用 agy CLI，脚本将继续检查 CLI 状态栏配置。" -ForegroundColor Yellow
 }
 
+function Test-ValidPeExecutable([string]$filePath, [long]$minBytes = 100000) {
+    if (-not $filePath -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) { return $false }
+    try {
+        $fi = Get-Item -LiteralPath $filePath -ErrorAction Stop
+        if ($fi.Length -lt $minBytes) { return $false }
+        $fs = [System.IO.File]::Open($filePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $hdr = New-Object byte[] 2
+            if ($fs.Read($hdr, 0, 2) -ne 2) { return $false }
+            return ($hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A)
+        } finally {
+            $fs.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-AccountSwitchEngine {
+    if ($env:ANTIGRAVITY_SKIP_SWITCH_ENGINE -eq "1") {
+        return
+    }
+    if (-not $env:LOCALAPPDATA) {
+        Write-Host "[账号引擎] 未找到 LOCALAPPDATA 环境变量，跳过内置账号引擎部署。" -ForegroundColor Yellow
+        return
+    }
+
+    $targetDir = Join-Path $env:LOCALAPPDATA "agy-switch"
+    $targetExe = Join-Path $targetDir "agy-switch.exe"
+    $batDir = if ($env:SELF_BAT) { Split-Path -Parent $env:SELF_BAT } else { (Get-Location).Path }
+
+    # 1. 若本地仓库/安装包旁已有编译或预置的 agy-switch.exe，优先直接同步（离线秒装）
+    $localCandidates = @(
+        (Join-Path $batDir "tools\agy-switch-lite\target\release\agy-switch.exe"),
+        (Join-Path $batDir "bin\agy-switch.exe"),
+        (Join-Path $batDir "agy-switch.exe")
+    )
+    foreach ($cand in $localCandidates) {
+        if (Test-ValidPeExecutable $cand 100000) {
+            $needCopy = -not (Test-ValidPeExecutable $targetExe 100000)
+            if (-not $needCopy) {
+                try {
+                    $srcFi = Get-Item -LiteralPath $cand -ErrorAction Stop
+                    $dstFi = Get-Item -LiteralPath $targetExe -ErrorAction Stop
+                    if ($srcFi.Length -ne $dstFi.Length -or $srcFi.LastWriteTimeUtc -gt $dstFi.LastWriteTimeUtc) {
+                        $needCopy = $true
+                    }
+                } catch { $needCopy = $true }
+            }
+            if ($needCopy) {
+                Copy-FileAtomic $cand $targetExe
+                Write-Host "[账号引擎] 已从本地同步 agy-switch.exe -> $targetExe" -ForegroundColor Green
+            } else {
+                Write-Host "[账号引擎] 已就绪: $targetExe" -ForegroundColor DarkGray
+            }
+            return
+        }
+    }
+
+    # 2. 若本机已安装有效引擎（含用户自定义 ANTIGRAVITY_SWITCH_CLI），且未要求强制更新，则零延迟直接复用
+    if ($env:ANTIGRAVITY_UPDATE_SWITCH_ENGINE -ne "1") {
+        if ($env:ANTIGRAVITY_SWITCH_CLI -and (Test-ValidPeExecutable $env:ANTIGRAVITY_SWITCH_CLI 100000)) {
+            Write-Host "[账号引擎] 已检测到自定义引擎: $($env:ANTIGRAVITY_SWITCH_CLI)" -ForegroundColor DarkGray
+            return
+        }
+        if (Test-ValidPeExecutable $targetExe 100000) {
+            Write-Host "[账号引擎] 已就绪: $targetExe" -ForegroundColor DarkGray
+            return
+        }
+    }
+
+    # 3. 从 GitHub Releases 自动下载由 GitHub Actions 公开编译的预编译引擎（无需安装 Rust）
+    $downloadUrl = if ($env:ANTIGRAVITY_SWITCH_DOWNLOAD_URL -and $env:ANTIGRAVITY_SWITCH_DOWNLOAD_URL.Trim()) {
+        $env:ANTIGRAVITY_SWITCH_DOWNLOAD_URL.Trim()
+    } else {
+        "https://github.com/Hsanli060/antigravity-token-pulse/releases/latest/download/agy-switch-windows-x64.exe"
+    }
+    $shaUrl = $downloadUrl + ".sha256"
+
+    Write-Host ""
+    Write-Host "[账号引擎] 正在自动下载预编译账号管理引擎 (agy-switch.exe，无需编译 Rust)..." -ForegroundColor Cyan
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("agy-switch-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    $prevProgress = $ProgressPreference
+    $downloadedOk = $false
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        $expectedSha = ""
+        try {
+            $shaResp = Invoke-WebRequest -Uri $shaUrl -UseBasicParsing -TimeoutSec 12 -UserAgent "Antigravity-Telemetry-Installer"
+            $shaText = Read-HttpResponseUtf8Text $shaResp
+            if ($shaText -and $shaText.Trim() -match '^([0-9a-fA-F]{64})\b') {
+                $expectedSha = $matches[1].ToLowerInvariant()
+            }
+        } catch {}
+
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpExe -UseBasicParsing -TimeoutSec 45 -UserAgent "Antigravity-Telemetry-Installer"
+        if (-not (Test-ValidPeExecutable $tmpExe 300000)) {
+            throw "下载文件校验失败（非有效 Windows 可执行文件）"
+        }
+        if ($expectedSha) {
+            $actualSha = Get-Sha256Hex ([System.IO.File]::ReadAllBytes($tmpExe))
+            if ($actualSha -ne $expectedSha) {
+                throw "SHA-256 校验不匹配 (expected=$expectedSha, actual=$actualSha)"
+            }
+        }
+        Copy-FileAtomic $tmpExe $targetExe
+        Write-Host "[账号引擎] 已自动部署至 $targetExe" -ForegroundColor Green
+        $downloadedOk = $true
+    } catch {
+        Write-Host "[账号引擎] 自动下载预编译引擎未成功: $($_.Exception.Message)" -ForegroundColor Yellow
+    } finally {
+        $ProgressPreference = $prevProgress
+        if (Test-Path -LiteralPath $tmpExe) {
+            Remove-Item -LiteralPath $tmpExe -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($downloadedOk) {
+        return
+    }
+
+    # 4. 离线/无网络回退：若本机已有 Rust 工具链且存在源码目录，则自动本地编译
+    $liteDir = Join-Path $batDir "tools\agy-switch-lite"
+    $cargoToml = Join-Path $liteDir "Cargo.toml"
+    $cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+    if ((Test-Path -LiteralPath $cargoToml -PathType Leaf) -and $cargoCmd) {
+        Write-Host "[账号引擎] 检测到本机已安装 Cargo，尝试从本地源码自动构建 agy-switch.exe..." -ForegroundColor Yellow
+        try {
+            Push-Location -LiteralPath $liteDir
+            try {
+                & $cargoCmd.Source build --release
+                $builtExe = Join-Path $liteDir "target\release\agy-switch.exe"
+                if ($LASTEXITCODE -eq 0 -and (Test-ValidPeExecutable $builtExe 100000)) {
+                    Copy-FileAtomic $builtExe $targetExe
+                    Write-Host "[账号引擎] 已从本地源码构建并部署至 $targetExe" -ForegroundColor Green
+                    return
+                }
+            } finally {
+                Pop-Location
+            }
+        } catch {}
+    }
+
+    Write-Host "[账号引擎] 提示: 「账号」标签页仍会正常显示；联网后重新运行本脚本，或从 GitHub Releases 下载 agy-switch-windows-x64.exe 重命名为 agy-switch.exe 放入 $targetDir 即可立即启用。" -ForegroundColor Yellow
+}
+
+function Start-DetachedApp([string]$targetExe) {
+    if (-not $targetExe -or -not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
+        return $false
+    }
+    $workDir = Split-Path -Parent $targetExe
+    # 1. 优先通过 WMI Win32_Process.Create 在独立宿主进程树 (WmiPrvSE) 启动，彻底脱离当前终端 ConPTY/Job Object，关闭终端绝不连带关闭 Antigravity
+    try {
+        $si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]1 } -ErrorAction Stop
+        $cmdLine = "`"$targetExe`""
+        $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+            CommandLine               = $cmdLine
+            CurrentDirectory          = $workDir
+            ProcessStartupInformation = $si
+        } -ErrorAction Stop
+        if ($res -and $res.ReturnValue -eq 0) {
+            return $true
+        }
+    } catch {}
+    # 2. 次选通过 explorer.exe 委派桌面 Shell 拉起
+    try {
+        Start-Process -FilePath "explorer.exe" -ArgumentList @("`"$targetExe`"") -ErrorAction Stop | Out-Null
+        return $true
+    } catch {}
+    # 3. 最终兜底
+    try {
+        Start-Process -FilePath $targetExe -WorkingDirectory $workDir -ErrorAction Stop | Out-Null
+        return $true
+    } catch {}
+    return $false
+}
+
 function Invoke-InstallerMain {
     Write-Host "=============================================================" -ForegroundColor Cyan
-    Write-Host "  Antigravity 2.0 & CLI 遥测栏 + Token 活动热力图 安装器" -ForegroundColor Cyan
+    Write-Host "  Antigravity Token Pulse 一键安装器 (桌面端 + 账号引擎 + CLI)" -ForegroundColor Cyan
     Write-Host "  - 实时遥测条: 速率(t/s) | 上下文环形图(/ 1M) | 缓存命中率 | 累计消耗" -ForegroundColor DarkCyan
-    Write-Host "  - 交互热力图: 点击遥测条展开 Daily / Weekly / Monthly 面板" -ForegroundColor DarkCyan
+    Write-Host "  - 活动与账号: 点击遥测条展开 53 周热力图 / 分模型账本 / 多账号配额切换" -ForegroundColor DarkCyan
     Write-Host "  - CLI 同步  : 自动配置 agy statusLine 并共享 Token 账本缓存" -ForegroundColor DarkCyan
     Write-Host "=============================================================" -ForegroundColor Cyan
     Write-Host ""
@@ -974,7 +1154,7 @@ if ($asarPath) {
         $choice = if ($modeEnv) {
             if ($modeEnv -eq "restore") { "2" } else { "1" }
         } else {
-            Write-Host "  [1] 重新安装 / 升级到最新版遥测栏 + 热力图 (默认)" -ForegroundColor White
+            Write-Host "  [1] 重新安装 / 升级到最新版遥测栏 + 热力图 + 账号管理 (默认)" -ForegroundColor White
             Write-Host "  [2] 恢复官方原版 app.asar 并移除扩展" -ForegroundColor Yellow
             Read-Host "请选择 [1/2] (直接回车执行 1)"
         }
@@ -1343,21 +1523,29 @@ if ($hasCli -or (Test-Path -LiteralPath $cliHome)) {
     }
 }
 
+# 3. 安装模式下自动部署内置账号管理引擎 (agy-switch.exe)
+if ($actionMode -eq "install") {
+    Ensure-AccountSwitchEngine
+}
+
 Write-Host ""
 Write-Host "=============================================================" -ForegroundColor Green
 if ($actionMode -eq "restore") {
     Write-Host " [完成] 已恢复 Antigravity 2.0 官方原版。" -ForegroundColor Green
 } elseif ($skipAsarDueToFuse) {
-    Write-Host " [完成] CLI 检查已完成（桌面端因 Electron 完整性熔断位保护已跳过）。" -ForegroundColor Yellow
+    Write-Host " [完成] CLI 与账号引擎检查已完成（桌面端因 Electron 完整性熔断位保护已跳过）。" -ForegroundColor Yellow
 } else {
-    Write-Host " [成功] Antigravity 2.0 遥测栏 + 热力图补丁安装完成！" -ForegroundColor Green
+    Write-Host " [成功] Antigravity Token Pulse (遥测栏 + 热力图 + 账号管理) 安装完成！" -ForegroundColor Green
     Write-Host " 提示: 客户端自动升级覆盖后，再次双击本文件即可 1 秒恢复。" -ForegroundColor Green
 }
 Write-Host "=============================================================" -ForegroundColor Green
 
     if ($asarPath -and (-not $skipAsarDueToFuse) -and (-not $env:ANTIGRAVITY_ASAR_PATH) -and $wasRunning -and $exePath -and (Test-Path -LiteralPath $exePath)) {
-        Start-Process -FilePath $exePath
-        Write-Host "[OK] 已为您自动重新打开 Antigravity 2.0！" -ForegroundColor Cyan
+        if (Start-DetachedApp $exePath) {
+            Write-Host "[OK] 已在独立进程中为您自动重新打开 Antigravity 2.0！" -ForegroundColor Cyan
+        } else {
+            Write-Host "[提示] 未能自动拉起 Antigravity 2.0，请手动启动客户端。" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -1379,9 +1567,21 @@ try {
     if (-not $skipPause) {
         Write-Host ""
         try {
-            if (-not [Console]::IsInputRedirected) {
-                Write-Host "按任意键退出..." -ForegroundColor DarkGray
-                [void][Console]::ReadKey($true)
+            if ($installerExitCode -ne 0) {
+                if (-not [Console]::IsInputRedirected) {
+                    Write-Host "按任意键退出..." -ForegroundColor DarkGray
+                    [void][Console]::ReadKey($true)
+                }
+            } else {
+                Write-Host "操作已完成，2 秒后自动关闭窗口（按任意键立即关闭）..." -ForegroundColor DarkGray
+                $closeDeadline = [DateTime]::UtcNow.AddMilliseconds(1800)
+                while ([DateTime]::UtcNow -lt $closeDeadline) {
+                    if (-not [Console]::IsInputRedirected -and [Console]::KeyAvailable) {
+                        [void][Console]::ReadKey($true)
+                        break
+                    }
+                    Start-Sleep -Milliseconds 50
+                }
             }
         } catch {}
     }

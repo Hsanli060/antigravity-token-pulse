@@ -221,13 +221,14 @@ fn cmd_list(root: &Path) -> Result<serde_json::Value, String> {
     let _ = fast_local_current_align(root);
     let (index, accounts) = store::list_accounts(root)?;
     let cur_id = index.current_account_id.as_deref();
-    let views: Vec<AccountView> = accounts
+    let mut views: Vec<AccountView> = accounts
         .into_iter()
         .map(|a| {
             let is_cur = cur_id == Some(a.id.as_str());
             AccountView::from_account(a, is_cur)
         })
         .collect();
+    views.sort_by_key(|v| !v.is_current);
     Ok(json!({
         "schema_version": 1,
         "accounts": views,
