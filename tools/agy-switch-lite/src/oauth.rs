@@ -329,7 +329,7 @@ static SHARED_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .pool_max_idle_per_host(8)
+        .pool_max_idle_per_host(24)
         .build()
         .map_err(|e| format!("Cannot build HTTP client: {e}"))
 }

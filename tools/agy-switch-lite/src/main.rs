@@ -335,7 +335,12 @@ async fn cmd_refresh(root: &Path, selector: Option<&str>) -> Result<serde_json::
         let _ = oauth::resolve_oauth_client(root, None, None).await;
     }
 
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
+    let max_concurrency = std::env::var("AGY_SWITCH_REFRESH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 32))
+        .unwrap_or(20);
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
     let root_buf = root.to_path_buf();
     let mut set = tokio::task::JoinSet::new();
 
