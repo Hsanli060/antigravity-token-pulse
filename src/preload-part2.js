@@ -1509,7 +1509,7 @@ accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 accountsSwitchingId = accountId;
 accountsErrorMsg = '';
-accountsStatusMsg = '正在后台静默切换账号并重启 Antigravity 2.0（同时同步 agy CLI），请稍候...';
+accountsStatusMsg = '正在后台切换账号并重启 Antigravity 2.0（约 2~4 秒，窗口关闭后将自动重新打开）...';
 renderAccountsSection();
 try {
 const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-switch', accountId);

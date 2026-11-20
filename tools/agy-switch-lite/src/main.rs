@@ -433,21 +433,42 @@ async fn cmd_switch(
     target: &str,
     is_worker: bool,
 ) -> Result<serde_json::Value, String> {
-    let (_, accounts) = store::list_accounts(root)?;
-    let mut acc = accounts
-        .into_iter()
-        .find(|a| a.id == selector || a.email.eq_ignore_ascii_case(selector))
-        .ok_or_else(|| format!("Account not found: {selector}"))?;
+    let mut acc = if is_worker {
+        match store::load_account(root, selector) {
+            Ok(a) => a,
+            Err(_) => {
+                let (_, accounts) = store::list_accounts(root)?;
+                accounts
+                    .into_iter()
+                    .find(|a| a.id == selector || a.email.eq_ignore_ascii_case(selector))
+                    .ok_or_else(|| format!("Account not found: {selector}"))?
+            }
+        }
+    } else {
+        let (_, accounts) = store::list_accounts(root)?;
+        accounts
+            .into_iter()
+            .find(|a| a.id == selector || a.email.eq_ignore_ascii_case(selector))
+            .ok_or_else(|| format!("Account not found: {selector}"))?
+    };
 
     if acc.disabled || acc.validation_blocked {
         return Err("Account is disabled or validation blocked".to_string());
     }
 
-    let fresh = oauth::ensure_fresh_token(root, &acc.token).await?;
-    acc.token = fresh;
-    acc.last_used = now_unix();
-    store::save_account(root, &acc)?;
-    store::save_identity_cache_entry(root, &store::sha256_hex(&acc.token.refresh_token), &acc.email);
+    let token_needs_refresh = acc.token.expiry_timestamp <= now_unix() + 900
+        || acc.token.access_token.trim().is_empty();
+    if !is_worker || token_needs_refresh {
+        let fresh = oauth::ensure_fresh_token(root, &acc.token).await?;
+        acc.token = fresh;
+        acc.last_used = now_unix();
+        store::save_account(root, &acc)?;
+        store::save_identity_cache_entry(
+            root,
+            &store::sha256_hex(&acc.token.refresh_token),
+            &acc.email,
+        );
+    }
 
     if target == "agy" {
         let _lock = store::SwitchLock::acquire(root)?;

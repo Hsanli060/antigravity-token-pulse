@@ -415,7 +415,7 @@ pub fn close_antigravity_gracefully() -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
     };
 
     let (initial_pids, _) = find_running_antigravity();
@@ -423,7 +423,7 @@ pub fn close_antigravity_gracefully() -> Result<(), String> {
         return Ok(());
     }
 
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+    unsafe extern "system" fn enum_close_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         let pids = &*(lparam as *const Vec<u32>);
         let mut wpid: u32 = 0;
         GetWindowThreadProcessId(hwnd, &mut wpid);
@@ -433,16 +433,61 @@ pub fn close_antigravity_gracefully() -> Result<(), String> {
         1
     }
 
-    unsafe {
-        EnumWindows(Some(enum_proc), &initial_pids as *const Vec<u32> as LPARAM);
+    struct VisibleCheck<'a> {
+        pids: &'a [u32],
+        any_visible: bool,
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    unsafe extern "system" fn enum_visible_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let state = &mut *(lparam as *mut VisibleCheck<'_>);
+        if IsWindowVisible(hwnd) != 0 {
+            let mut wpid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut wpid);
+            if state.pids.contains(&wpid) {
+                state.any_visible = true;
+                return 0;
+            }
+        }
+        1
+    }
+
+    let has_visible_window = |pids: &[u32]| -> bool {
+        let mut state = VisibleCheck {
+            pids,
+            any_visible: false,
+        };
+        unsafe {
+            EnumWindows(
+                Some(enum_visible_proc),
+                &mut state as *mut VisibleCheck<'_> as LPARAM,
+            );
+        }
+        state.any_visible
+    };
+
+    unsafe {
+        EnumWindows(
+            Some(enum_close_proc),
+            &initial_pids as *const Vec<u32> as LPARAM,
+        );
+    }
+
+    // Give Electron a short graceful flush window (up to 1.8s), exiting early once visible windows
+    // disappear (e.g. minimized to tray) after a brief 350ms flush grace period.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1800);
+    let mut ui_closed_at: Option<std::time::Instant> = None;
     while std::time::Instant::now() < deadline {
-        if find_running_antigravity().0.is_empty() {
+        let (pids_now, _) = find_running_antigravity();
+        if pids_now.is_empty() {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !has_visible_window(&pids_now) {
+            let first = *ui_closed_at.get_or_insert_with(std::time::Instant::now);
+            if first.elapsed() >= std::time::Duration::from_millis(350) {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
     }
 
     let (remaining, _) = find_running_antigravity();
@@ -456,12 +501,12 @@ pub fn close_antigravity_gracefully() -> Result<(), String> {
         }
     }
 
-    let force_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let force_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < force_deadline {
         if find_running_antigravity().0.is_empty() {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(())
 }
@@ -600,7 +645,7 @@ fn shell_execute_open(exe_path: &Path) -> Result<(), String> {
 }
 
 pub fn start_antigravity_detached(exe_path: &Path) -> Result<(), String> {
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(std::time::Duration::from_millis(120));
 
     let mut cmd = std::process::Command::new(exe_path);
     if let Some(parent) = exe_path.parent() {
@@ -634,19 +679,18 @@ pub fn start_antigravity_detached(exe_path: &Path) -> Result<(), String> {
         if !spawned_ok {
             shell_execute_open(exe_path)?;
         }
-        // Wait up to 1.5s to verify Antigravity.exe process appeared; if not, fallback to ShellExecuteW
-        let check_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        // Verify Antigravity.exe process appeared within 1.0s; if not, fallback to ShellExecuteW
+        let check_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
         let mut seen = false;
         while std::time::Instant::now() < check_deadline {
             if !find_running_antigravity().0.is_empty() {
                 seen = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if !seen && spawned_ok {
             let _ = shell_execute_open(exe_path);
-            std::thread::sleep(std::time::Duration::from_millis(300));
         }
         Ok(())
     }

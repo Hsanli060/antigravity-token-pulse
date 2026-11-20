@@ -318,9 +318,30 @@ function Get-ElectronAsarFuseState([string]$exePath) {
     if (-not $exePath -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
         return @{ Found = $false; AsarIntegrityEnabled = $false }
     }
-    $sentinel = [System.Text.Encoding]::ASCII.GetBytes("dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX")
-    $chunkSize = 4 * 1024 * 1024
+    $fi = $null
+    $cacheKey = ""
+    $cachePath = Join-Path ([System.IO.Path]::GetTempPath()) "agy-telemetry-fuse-cache.txt"
+    try {
+        $fi = Get-Item -LiteralPath $exePath -ErrorAction Stop
+        $cacheKey = "$($fi.FullName.ToLowerInvariant())|$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+        if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+            $cachedLine = ([System.IO.File]::ReadAllText($cachePath, [System.Text.Encoding]::UTF8)).Trim()
+            $parts = $cachedLine -split "`t"
+            if ($parts.Length -eq 4 -and $parts[0] -eq $cacheKey) {
+                return @{
+                    Found                = ($parts[1] -eq "1")
+                    Flags                = $parts[2]
+                    AsarIntegrityEnabled = ($parts[3] -eq "1")
+                }
+            }
+        }
+    } catch {}
+
+    $sentinelStr = "dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX"
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $chunkSize = 8 * 1024 * 1024
     $overlap = 128
+    $result = @{ Found = $false; Flags = ""; AsarIntegrityEnabled = $false }
     $fs = [System.IO.File]::Open($exePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $buf = New-Object byte[] ($chunkSize + $overlap)
@@ -329,37 +350,32 @@ function Get-ElectronAsarFuseState([string]$exePath) {
             $read = $fs.Read($buf, $carry, $chunkSize)
             if ($read -le 0) { break }
             $total = $carry + $read
-            $limit = $total - $sentinel.Length - 6
-            for ($i = 0; $i -le $limit; $i++) {
-                if ($buf[$i] -ne $sentinel[0]) { continue }
-                $matched = $true
-                for ($j = 1; $j -lt $sentinel.Length; $j++) {
-                    if ($buf[$i + $j] -ne $sentinel[$j]) { $matched = $false; break }
-                }
-                if (-not $matched) { continue }
-                $verPos = $i + $sentinel.Length
-                $ver = [int]$buf[$verPos]
-                $cnt = [int]$buf[$verPos + 1]
-                if ($ver -ge 1 -and $ver -le 5 -and $cnt -ge 5 -and $cnt -le 32 -and ($verPos + 2 + $cnt) -le $total) {
-                    $validChars = $true
-                    $sb = New-Object System.Text.StringBuilder
-                    for ($k = 0; $k -lt $cnt; $k++) {
-                        $b = $buf[$verPos + 2 + $k]
-                        if ($b -ne 0x30 -and $b -ne 0x31) { $validChars = $false; break }
-                        [void]$sb.Append([char]$b)
-                    }
-                    if ($validChars) {
-                        $flagsStr = $sb.ToString()
-                        return @{
-                            Found                = $true
-                            Version              = $ver
-                            Count                = $cnt
-                            Flags                = $flagsStr
-                            AsarIntegrityEnabled = ($flagsStr[4] -eq '1')
+            $chunkStr = $latin1.GetString($buf, 0, $total)
+            $searchPos = 0
+            while ($true) {
+                $idx = $chunkStr.IndexOf($sentinelStr, $searchPos, [System.StringComparison]::Ordinal)
+                if ($idx -lt 0) { break }
+                $verPos = $idx + $sentinelStr.Length
+                if (($verPos + 7) -le $total) {
+                    $ver = [int]$buf[$verPos]
+                    $cnt = [int]$buf[$verPos + 1]
+                    if ($ver -ge 1 -and $ver -le 5 -and $cnt -ge 5 -and $cnt -le 32 -and ($verPos + 2 + $cnt) -le $total) {
+                        $flagsStr = $latin1.GetString($buf, $verPos + 2, $cnt)
+                        if ($flagsStr -match '^[01]+$') {
+                            $result = @{
+                                Found                = $true
+                                Version              = $ver
+                                Count                = $cnt
+                                Flags                = $flagsStr
+                                AsarIntegrityEnabled = ($flagsStr[4] -eq '1')
+                            }
+                            break
                         }
                     }
                 }
+                $searchPos = $idx + 1
             }
+            if ($result.Found) { break }
             if ($total -gt $overlap) {
                 [Array]::Copy($buf, $total - $overlap, $buf, 0, $overlap)
                 $carry = $overlap
@@ -370,7 +386,14 @@ function Get-ElectronAsarFuseState([string]$exePath) {
     } finally {
         $fs.Dispose()
     }
-    return @{ Found = $false; AsarIntegrityEnabled = $false }
+    if ($cacheKey) {
+        try {
+            $fVal = if ($result.Found) { "1" } else { "0" }
+            $eVal = if ($result.AsarIntegrityEnabled) { "1" } else { "0" }
+            [System.IO.File]::WriteAllText($cachePath, "$cacheKey`t$fVal`t$($result.Flags)`t$eVal", (New-Object System.Text.UTF8Encoding($false)))
+        } catch {}
+    }
+    return $result
 }
 
 function Test-NodeJsSyntax([string]$ipcCode, [string]$preCode) {
@@ -787,36 +810,13 @@ if ($env:ANTIGRAVITY_ASAR_PATH -and $env:ANTIGRAVITY_ASAR_PATH.Trim()) {
         }
     }
 
-    # (a) 运行中进程路径
+    # (a) 优先检查运行中进程路径与常见默认安装目录（毫秒级，避免每次都全表扫描注册表）
     $runningProcs = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)
     foreach ($rp in $runningProcs) {
         try {
             if ($rp.Path) { & $addOrdered (Split-Path -Parent $rp.Path) }
         } catch {}
     }
-
-    # (b) Registry Uninstall (HKCU / HKLM / WOW6432Node)
-    $regRoots = @(
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-    foreach ($regPath in $regRoots) {
-        $items = @(Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)
-        foreach ($item in $items) {
-            $dn = [string]$item.DisplayName
-            $il = [string]$item.InstallLocation
-            $di = [string]$item.DisplayIcon
-            $us = [string]$item.UninstallString
-            if ($dn -match 'Antigravity' -or $il -match 'Antigravity' -or $di -match 'Antigravity' -or $us -match 'Antigravity') {
-                if ($il) { & $addOrdered $il }
-                if ($di) { & $addOrdered (Extract-ExeDirFromRegistryString $di) }
-                if ($us) { & $addOrdered (Extract-ExeDirFromRegistryString $us) }
-            }
-        }
-    }
-
-    # (c) 常见默认安装目录
     if ($env:LOCALAPPDATA) {
         & $addOrdered (Join-Path $env:LOCALAPPDATA "Programs\Antigravity")
         & $addOrdered (Join-Path $env:LOCALAPPDATA "Antigravity")
@@ -837,9 +837,49 @@ if ($env:ANTIGRAVITY_ASAR_PATH -and $env:ANTIGRAVITY_ASAR_PATH.Trim()) {
         if (Test-Path -LiteralPath $candAsar -PathType Leaf) {
             if (-not $asarPath) {
                 $asarPath = (Resolve-Path -LiteralPath $candAsar).Path
+                break
             }
         } elseif (Test-Path -LiteralPath $candIdeApp -PathType Container) {
             [void]$detectedIdeDirs.Add($dir)
+        }
+    }
+
+    # (b) 仅在常见路径未命中时，回退扫描 Registry Uninstall (HKCU / HKLM / WOW6432Node)
+    if (-not $asarPath) {
+        $regDirs = New-Object System.Collections.Generic.List[string]
+        $regRoots = @(
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
+        foreach ($regPath in $regRoots) {
+            $items = @(Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)
+            foreach ($item in $items) {
+                $dn = [string]$item.DisplayName
+                $il = [string]$item.InstallLocation
+                $di = [string]$item.DisplayIcon
+                $us = [string]$item.UninstallString
+                if ($dn -match 'Antigravity' -or $il -match 'Antigravity' -or $di -match 'Antigravity' -or $us -match 'Antigravity') {
+                    foreach ($cand in @($il, (Extract-ExeDirFromRegistryString $di), (Extract-ExeDirFromRegistryString $us))) {
+                        if (-not $cand) { continue }
+                        $clean = $cand.Trim().Trim('"').TrimEnd('\')
+                        try { $clean = [System.IO.Path]::GetFullPath($clean) } catch {}
+                        if ($clean -and $seenInstallDirs.Add($clean)) { [void]$regDirs.Add($clean) }
+                    }
+                }
+            }
+        }
+        foreach ($dir in $regDirs) {
+            $candAsar = Join-Path $dir "resources\app.asar"
+            $candIdeApp = Join-Path $dir "resources\app"
+            if (Test-Path -LiteralPath $candAsar -PathType Leaf) {
+                if (-not $asarPath) {
+                    $asarPath = (Resolve-Path -LiteralPath $candAsar).Path
+                    break
+                }
+            } elseif (Test-Path -LiteralPath $candIdeApp -PathType Container) {
+                [void]$detectedIdeDirs.Add($dir)
+            }
         }
     }
 }
@@ -944,6 +984,7 @@ if ($asarPath) {
     }
 
     if ($actionMode -eq "install" -and $env:ANTIGRAVITY_IGNORE_FUSE_CHECK -ne "1") {
+        Write-Host "[校验] 正在检查 Electron ASAR 完整性熔断位..." -ForegroundColor DarkGray
         $fuseState = Get-ElectronAsarFuseState $exePath
         if ($fuseState.Found -and $fuseState.AsarIntegrityEnabled) {
             Write-Host ""
@@ -963,7 +1004,7 @@ if ($asarPath) {
         $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
         $installRootDir = (Split-Path -Parent $resourcesDir).TrimEnd('\') + '\'
         $findTargetProcs = {
-            @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            @(Get-Process -Name "Antigravity","language_server" -ErrorAction SilentlyContinue | Where-Object {
                 if ($_.SessionId -ne $currentSessionId) { return $false }
                 if ($_.ProcessName -eq "Antigravity") { return $true }
                 try {
@@ -1000,9 +1041,10 @@ if ($asarPath) {
                 }
                 $pids = @($procs | ForEach-Object { $_.Id })
                 if ($pids.Count -gt 0) {
-                    Wait-Process -Id $pids -Timeout 10 -ErrorAction SilentlyContinue
+                    Wait-Process -Id $pids -Timeout 5 -ErrorAction SilentlyContinue
                 }
-                Start-Sleep -Milliseconds 500
+                if ((& $findTargetProcs).Count -eq 0) { break }
+                Start-Sleep -Milliseconds 120
             }
             $leftover = & $findTargetProcs
             if ($leftover.Count -gt 0) {
@@ -1012,17 +1054,17 @@ if ($asarPath) {
     }
 
     if ($needModifyAsar) {
-        # 等待子进程/杀软释放文件写入锁（最多 15 次 × 500ms）
-        for ($w = 0; $w -lt 15; $w++) {
+        # 等待子进程/杀软释放文件写入锁（高频轮询，快速通过）
+        for ($w = 0; $w -lt 40; $w++) {
             try {
                 $testFs = [System.IO.File]::Open($asarPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
                 $testFs.Dispose()
                 break
             } catch {
-                if ($w -eq 14) {
+                if ($w -eq 39) {
                     throw "目标文件被占用且无法获得写入锁: $asarPath 。请先关闭 Antigravity 2.0 后重试。"
                 }
-                Start-Sleep -Milliseconds 500
+                Start-Sleep -Milliseconds 120
             }
         }
     }
