@@ -1569,9 +1569,9 @@ text-align: center;
 }
 #${MODAL_ID} .agy-ta-pool-row {
 display: grid;
-grid-template-columns: minmax(0, 1fr) 32px 44px;
+grid-template-columns: minmax(0, 1fr) 32px 36px;
 align-items: center;
-column-gap: 8px;
+column-gap: 6px;
 padding-top: 4px;
 min-width: 0;
 }
@@ -1719,7 +1719,7 @@ color: var(--agy-ta-q-low);
 font-size: 10px;
 line-height: 1;
 color: var(--agy-ta-muted);
-text-align: left;
+text-align: right;
 white-space: nowrap;
 overflow: hidden;
 text-overflow: ellipsis;

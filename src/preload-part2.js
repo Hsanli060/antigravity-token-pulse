@@ -2011,10 +2011,6 @@ overlay.innerHTML = `
 </div>
 <div class="agy-ta-acct-notice" data-role="ta-acct-notice" hidden></div>
 <div class="agy-ta-acct-list" data-role="ta-acct-list"></div>
-<div class="agy-ta-acct-foot">
-<span class="agy-ta-ellipsis">后端引擎：agy-switch 后台静默驱动（与 Antigravity 2.0 进程隔离）</span>
-<span class="agy-ta-acct-foot-right">切换将自动重启客户端并同步 agy CLI</span>
-</div>
 </div>
 </div>
 <div class="agy-ta-tooltip" data-role="ta-tooltip">
