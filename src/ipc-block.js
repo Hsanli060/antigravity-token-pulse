@@ -762,9 +762,11 @@ const childProcessTelemetry = require('child_process');
 const SWITCH_ACCOUNT_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 const SWITCH_CLI_CONFIG_FILE = 'telemetry-switch-cli.json';
 let accountsRefreshInFlight = null;
+let accountsSyncInFlight = null;
 let accountsSwitchInFlight = false;
 let accountsDeleteInFlight = false;
 let activeAddSession = null;
+let switchCliCapsCache = { key: '', caps: new Set() };
 
 function isTrustedLocalSender(event) {
   try {
@@ -1119,6 +1121,29 @@ async function fetchSanitizedAccountsList(cliPath) {
   };
 }
 
+async function probeSwitchCliCapabilities(cliPath) {
+  try {
+    const st = fsTelemetry.statSync(cliPath);
+    const cacheKey = `${cliPath}:${st.mtimeMs}:${st.size}`;
+    if (switchCliCapsCache.key === cacheKey) {
+      return switchCliCapsCache.caps;
+    }
+    const res = await runSwitchCliJson(cliPath, ['--version', '--json'], 2500);
+    const caps = new Set();
+    if (res.ok && res.data && Array.isArray(res.data.capabilities)) {
+      for (const item of res.data.capabilities) {
+        if (typeof item === 'string' && item.trim()) {
+          caps.add(item.trim().toLowerCase());
+        }
+      }
+    }
+    switchCliCapsCache = { key: cacheKey, caps };
+    return caps;
+  } catch {
+    return new Set();
+  }
+}
+
 electronMain.removeHandler?.('telemetry:accounts-list');
 electronMain.handle('telemetry:accounts-list', async (event) => {
   if (!isTrustedLocalSender(event)) {
@@ -1128,7 +1153,64 @@ electronMain.handle('telemetry:accounts-list', async (event) => {
   if (!cliPath) {
     return { available: false, reason: 'not_installed', accounts: [], currentId: null, currentTarget: null, error: null };
   }
-  return await fetchSanitizedAccountsList(cliPath);
+  const caps = await probeSwitchCliCapabilities(cliPath);
+  const listRes = await fetchSanitizedAccountsList(cliPath);
+  return {
+    ...listRes,
+    capabilities: Array.from(caps),
+  };
+});
+
+electronMain.removeHandler?.('telemetry:accounts-sync');
+electronMain.handle('telemetry:accounts-sync', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { available: false, synced: false, accounts: [], currentId: null, error: '拒绝非本地来源请求' };
+  }
+  const cliPath = resolveSwitchCliPath();
+  if (!cliPath) {
+    return { available: false, synced: false, accounts: [], currentId: null, error: '未检测到 agy-switch CLI' };
+  }
+  const caps = await probeSwitchCliCapabilities(cliPath);
+  if (!caps.has('sync')) {
+    const listRes = await fetchSanitizedAccountsList(cliPath);
+    return {
+      ...listRes,
+      capabilities: Array.from(caps),
+      synced: false,
+      imported: false,
+      changed: false,
+      syncedEmail: '',
+    };
+  }
+  if (!accountsSyncInFlight) {
+    accountsSyncInFlight = (async () => {
+      const syncRes = await runSwitchCliJson(cliPath, ['sync', '--json'], 20000);
+      const listRes = await fetchSanitizedAccountsList(cliPath);
+      if (!syncRes.ok) {
+        return {
+          ...listRes,
+          capabilities: Array.from(caps),
+          synced: false,
+          imported: false,
+          changed: false,
+          syncedEmail: '',
+          error: syncRes.error || listRes.error,
+        };
+      }
+      return {
+        ...listRes,
+        capabilities: Array.from(caps),
+        synced: Boolean(syncRes.data && syncRes.data.synced),
+        imported: Boolean(syncRes.data && syncRes.data.imported),
+        changed: Boolean(syncRes.data && syncRes.data.changed),
+        syncedEmail: sanitizeSafeText(syncRes.data && syncRes.data.email, 160),
+        error: listRes.error,
+      };
+    })().finally(() => {
+      accountsSyncInFlight = null;
+    });
+  }
+  return await accountsSyncInFlight;
 });
 
 electronMain.removeHandler?.('telemetry:accounts-refresh');
@@ -1575,11 +1657,14 @@ function getElectronShellSafe() {
   }
 }
 
-function startSilentAddSession(cliPath, baselineIds) {
+function startSilentAddSession(cliPath, baselineIds, useNativeAdd) {
   let cmd = '';
   let args = [];
   let env = { ...process.env, AGY_SWITCH_BIN: cliPath };
-  if (process.platform === 'win32') {
+  if (useNativeAdd) {
+    cmd = cliPath;
+    args = ['add', '--json'];
+  } else if (process.platform === 'win32') {
     const sysRoot = typeof process.env.SystemRoot === 'string' ? process.env.SystemRoot.trim() : '';
     const psCandidate = sysRoot
       ? pathTelemetry.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -1735,9 +1820,10 @@ electronMain.handle('telemetry:accounts-add', async (event) => {
   if (!cliPath || !isValidSwitchCliBinary(cliPath)) {
     return { ok: false, error: '未检测到 agy-switch CLI' };
   }
+  const caps = await probeSwitchCliCapabilities(cliPath);
   const curList = await fetchSanitizedAccountsList(cliPath);
   const baselineIds = (curList.accounts || []).map((a) => a && a.id).filter(Boolean);
-  const session = startSilentAddSession(cliPath, baselineIds);
+  const session = startSilentAddSession(cliPath, baselineIds, caps.has('add'));
   if (!session) {
     return { ok: false, error: '无法启动后台静默授权进程' };
   }
@@ -1875,6 +1961,25 @@ electronMain.handle('telemetry:accounts-delete', async (event, accountId) => {
   const cliPath = resolveSwitchCliPath();
   if (!cliPath) {
     return { ok: false, error: '未检测到 agy-switch CLI' };
+  }
+  const caps = await probeSwitchCliCapabilities(cliPath);
+  if (caps.has('delete')) {
+    accountsDeleteInFlight = true;
+    try {
+      const delRes = await runSwitchCliJson(cliPath, ['delete', cleanId, '--json'], 8000);
+      if (!delRes.ok) {
+        return { ok: false, error: delRes.error || '删除账号失败' };
+      }
+    } finally {
+      accountsDeleteInFlight = false;
+    }
+    const listRes = await fetchSanitizedAccountsList(cliPath);
+    return {
+      ok: true,
+      deletedId: cleanId,
+      capabilities: Array.from(caps),
+      ...listRes,
+    };
   }
   const homeDir = osTelemetry.homedir();
   const dataDir = resolveSwitchDataDir(homeDir);

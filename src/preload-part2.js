@@ -640,21 +640,45 @@ if (n >= 50) return 'var(--agy-ta-q-good)';
 if (n >= 20) return 'var(--agy-ta-q-warn)';
 return 'var(--agy-ta-q-low)';
 }
-function renderQuotaBarHtml(label, bucket) {
+function formatResetCountdownCompact(resetTimeStr) {
+if (typeof resetTimeStr !== 'string' || !resetTimeStr.trim()) {
+return '';
+}
+const ts = Date.parse(resetTimeStr.trim());
+if (!Number.isFinite(ts)) {
+return '';
+}
+const diffMs = ts - Date.now();
+if (diffMs <= 60000) {
+return '即将';
+}
+const totalMin = Math.round(diffMs / 60000);
+const days = Math.floor(totalMin / (60 * 24));
+const hours = Math.floor((totalMin % (60 * 24)) / 60);
+const mins = totalMin % 60;
+if (days > 0) {
+return `${days}d${hours > 0 ? `${hours}h` : ''}`;
+}
+if (hours > 0) {
+return `${hours}h${mins > 0 ? `${mins}m` : ''}`;
+}
+return `${mins}m`;
+}
+function renderQuotaBarHtml(label, bucket, shortLabel) {
 const pct = bucket && typeof bucket.pct === 'number' && Number.isFinite(bucket.pct) ? Math.max(0, Math.min(100, Math.round(bucket.pct))) : null;
-const resetTxt = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
-const valTxt = pct !== null ? `${pct}%${resetTxt ? ` · ${resetTxt}` : ''}` : '未知';
+const resetFull = bucket && bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '';
+const resetShort = bucket && bucket.resetTime ? formatResetCountdownCompact(bucket.resetTime) : '';
+const pctTxt = pct !== null ? `${pct}%` : '—';
+const fullTip = `${label}：${pct !== null ? `${pct}%` : '未知'}${resetFull ? ` · ${resetFull}` : ''}`;
 const widthPct = pct !== null ? pct : 0;
 const fillColor = getQuotaBarColor(pct);
+const dispLbl = shortLabel || label;
 return `
-<div class="agy-ta-comp-item">
-<div class="agy-ta-comp-head">
-<span class="agy-ta-comp-label" title="${escHtml(label)}"><span class="agy-ta-ellipsis">${escHtml(label)}</span></span>
-<span class="agy-ta-comp-val" title="${escHtml(valTxt)}">${escHtml(valTxt)}</span>
-</div>
-<div class="agy-ta-comp-track">
-<div class="agy-ta-comp-fill" style="width:${widthPct}%; background:${fillColor};"></div>
-</div>
+<div class="agy-ta-qbar" title="${escHtml(fullTip)}">
+<span class="agy-ta-qbar-lbl">${escHtml(dispLbl)}</span>
+<div class="agy-ta-qbar-track"><div class="agy-ta-qbar-fill" style="width:${widthPct}%; background:${fillColor};"></div></div>
+<span class="agy-ta-qbar-val">${escHtml(pctTxt)}</span>
+<span class="agy-ta-qbar-reset">${escHtml(resetShort || '—')}</span>
 </div>
 `;
 }
@@ -762,19 +786,16 @@ const readyAccts = accountsList.filter((a) => a && !a.disabled && !a.validationB
 const unavailableCount = Math.max(0, accountsList.length - readyAccts.length);
 if (activeAcct) {
 const curTitle = activeAcct.label || activeAcct.email || activeAcct.name || activeAcct.id;
-const curPlan = activeAcct.plan && activeAcct.plan !== 'UNKNOWN' ? activeAcct.plan : '本地已绑定';
-setRoleText('acct-kpi-current-val', curTitle, activeAcct.email || curTitle);
-setRoleText('acct-kpi-current-sub', `${curPlan} · 当前激活`, `${curPlan} · ${activeAcct.email || curTitle}`);
+const curPlan = activeAcct.plan && activeAcct.plan !== 'UNKNOWN' ? ` · ${activeAcct.plan}` : '';
+setRoleText('acct-kpi-current-val', `${curTitle}${curPlan}`, `当前登录：${activeAcct.email || curTitle}${curPlan}`);
 }
 else {
-setRoleText('acct-kpi-current-val', accountsList.length > 0 ? '未标记' : '--', '当前未检测到激活账号');
-setRoleText('acct-kpi-current-sub', accountsList.length > 0 ? '请选择账号进行切换' : '点击下方添加账号');
+setRoleText('acct-kpi-current-val', accountsList.length > 0 ? '未匹配' : '--', '当前未检测到已匹配的激活账号');
 }
-setRoleText('acct-kpi-count-val', `${accountsList.length} 个`, `共 ${accountsList.length} 个已保存账号`);
-const countSub = accountsList.length === 0
-? '尚未添加任何账号'
-: `${readyAccts.length} 个可用${unavailableCount > 0 ? ` · ${unavailableCount} 个受限` : ' · 随时可切'}`;
-setRoleText('acct-kpi-count-sub', countSub, countSub);
+const countText = accountsList.length === 0
+? '0'
+: `${accountsList.length} (${readyAccts.length} 可用${unavailableCount > 0 ? ` / ${unavailableCount} 受限` : ''})`;
+setRoleText('acct-kpi-count-val', countText, `共 ${accountsList.length} 个已保存账号，${readyAccts.length} 个可用`);
 
 let best5h = null;
 let bestWeek = null;
@@ -790,13 +811,12 @@ if (pw !== null && (!bestWeek || pw > bestWeek.pct)) {
 bestWeek = { pct: pw, who };
 }
 }
-setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--');
-setRoleText('acct-kpi-5h-sub', best5h ? best5h.who : '点击刷新额度获取', best5h ? `最高可用：${best5h.who} (${best5h.pct}%)` : '');
-setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--');
-setRoleText('acct-kpi-week-sub', bestWeek ? bestWeek.who : '后台静默驱动', bestWeek ? `最高可用：${bestWeek.who} (${bestWeek.pct}%)` : '');
+setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--', best5h ? `最高可用 Gemini 5h：${best5h.who} (${best5h.pct}%)` : '点击刷新额度获取');
+setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--', bestWeek ? `最高可用 Gemini 周额度：${bestWeek.who} (${bestWeek.pct}%)` : '点击刷新额度获取');
 
 const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
 const addBtn = activityOverlayEl.querySelector('[data-action="acct-add"]');
+const syncBtn = activityOverlayEl.querySelector('[data-action="acct-sync-live"]');
 const refreshBtn = activityOverlayEl.querySelector('[data-action="acct-refresh"]');
 const noticeEl = activityOverlayEl.querySelector('[data-role="ta-acct-notice"]');
 const listEl = activityOverlayEl.querySelector('[data-role="ta-acct-list"]');
@@ -812,20 +832,25 @@ latestTs = Number(a.lastUpdated);
 const agoTxt = formatUpdatedAgo(latestTs);
 metaEl.textContent = accountsLoading
 ? '读取本地账号列表...'
-: `共 ${accountsList.length} 个账号${agoTxt ? ` · ${agoTxt}` : ''}`;
+: `共 ${accountsList.length} 个${agoTxt ? ` · ${agoTxt}` : ''}`;
 }
 if (addBtn) {
 addBtn.disabled = anyBusy || accountsAddState === 'starting' || accountsAddState === 'finalizing';
 addBtn.textContent = accountsAddState === 'starting'
-? '正在启动授权...'
+? '启动授权中...'
 : accountsAddState === 'waiting_browser'
 ? '等待浏览器授权...'
 : accountsAddState === 'finalizing'
-? '正在同步账号...'
+? '同步账号中...'
 : '+ 添加账号';
 }
+if (syncBtn) {
+syncBtn.hidden = !accountsCanSync;
+syncBtn.disabled = accountsSyncing || accountsRefreshing || anyBusy || isAdding;
+syncBtn.textContent = accountsSyncing ? '同步中...' : '同步当前';
+}
 if (refreshBtn) {
-refreshBtn.disabled = accountsRefreshing || anyBusy || isAdding;
+refreshBtn.disabled = accountsRefreshing || accountsSyncing || anyBusy || isAdding;
 refreshBtn.textContent = accountsRefreshing ? '刷新中...' : '刷新额度';
 }
 if (noticeEl) {
@@ -919,52 +944,46 @@ actionHtml = `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-dange
 }
 else if (isConfirmSwitch) {
 actionHtml = `
-<span class="agy-ta-acct-confirm-hint">将重启客户端?</span>
-<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-confirm" data-account-id="${escHtml(acct.id)}">确认切换</button>
+<span class="agy-ta-acct-confirm-hint">将重启?</span>
+<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-confirm" data-account-id="${escHtml(acct.id)}">确认</button>
 <button type="button" class="agy-ta-acct-btn" data-action="acct-cancel">取消</button>
 `;
 }
 else if (isConfirmDelete) {
 actionHtml = `
-<span class="agy-ta-acct-confirm-hint">${isCurrent ? '移除当前本地记录?' : '移除本地账号?'}</span>
-<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-delete-confirm" data-account-id="${escHtml(acct.id)}">确认删除</button>
+<span class="agy-ta-acct-confirm-hint">${isCurrent ? '移除当前?' : '移除记录?'}</span>
+<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-danger" data-action="acct-delete-confirm" data-account-id="${escHtml(acct.id)}">确认</button>
 <button type="button" class="agy-ta-acct-btn" data-action="acct-cancel">取消</button>
 `;
 }
 else if (isCurrent) {
-actionHtml = `<span class="agy-ta-acct-state-lbl">当前账号</span>${deleteTriggerHtml}`;
+actionHtml = `<span class="agy-ta-acct-state-lbl">当前</span>${deleteTriggerHtml}`;
 }
 else if (isUnavailable) {
-actionHtml = `<span class="agy-ta-acct-state-lbl">不可切换</span>${deleteTriggerHtml}`;
+actionHtml = `<span class="agy-ta-acct-state-lbl">不可用</span>${deleteTriggerHtml}`;
 }
 else {
 actionHtml = `<button type="button" class="agy-ta-acct-btn" data-action="acct-switch" data-account-id="${escHtml(acct.id)}"${anyBusy ? ' disabled' : ''}>切换</button>${deleteTriggerHtml}`;
 }
 const q = acct.quota || {};
-const fiveBar = renderQuotaBarHtml('Gemini 5h 额度', q.fiveHour);
-const weekBar = renderQuotaBarHtml('Gemini 周额度', q.weekly);
-let secondaryHtml = '';
+const fiveBar = renderQuotaBarHtml('Gemini 5h 额度', q.fiveHour, '5h');
+const weekBar = renderQuotaBarHtml('Gemini 周额度', q.weekly, '周');
+const miniChips = [];
 const sec5 = q.secondaryFiveHour && typeof q.secondaryFiveHour.pct === 'number' ? `${q.secondaryFiveHour.pct}%` : null;
 const secW = q.secondaryWeekly && typeof q.secondaryWeekly.pct === 'number' ? `${q.secondaryWeekly.pct}%` : null;
 const argonW = q.argonWeekly && typeof q.argonWeekly.pct === 'number' ? `${q.argonWeekly.pct}%` : null;
-if (sec5 !== null || secW !== null || argonW !== null) {
-const secParts = [];
 if (sec5 !== null || secW !== null) {
 const secName = q.secondaryLabel || 'Claude / GPT';
-secParts.push(`${secName}: 5h ${sec5 !== null ? sec5 : '—'} · 周 ${secW !== null ? secW : '—'}`);
+const secTip = `${secName}：5h ${sec5 !== null ? sec5 : '未知'} · 周 ${secW !== null ? secW : '未知'}`;
+miniChips.push(`<span class="agy-ta-acct-mini-chip" title="${escHtml(secTip)}">3P <b>${escHtml(sec5 !== null ? sec5 : '—')}</b>/${escHtml(secW !== null ? secW : '—')}</span>`);
 }
 if (argonW !== null) {
-secParts.push(`Gemini 4 Argon: 周 ${argonW}`);
+const argonReset = q.argonWeekly && q.argonWeekly.resetTime ? ` · ${formatResetCountdown(q.argonWeekly.resetTime)}` : '';
+miniChips.push(`<span class="agy-ta-acct-mini-chip" title="${escHtml(`Gemini 4 Argon 周额度：${argonW}${argonReset}`)}">Argon <b>${escHtml(argonW)}</b></span>`);
 }
-const leftSec = secParts[0] || '';
-const rightSec = secParts[1] || '';
-secondaryHtml = `
-<div class="agy-ta-acct-secondary">
-<span class="agy-ta-ellipsis" title="${escHtml(leftSec)}">${escHtml(leftSec)}</span>
-${rightSec ? `<span class="agy-ta-acct-foot-right" title="${escHtml(rightSec)}">${escHtml(rightSec)}</span>` : ''}
-</div>
-`;
-}
+const miniPoolsHtml = (!isConfirmSwitch && !isConfirmDelete && miniChips.length > 0)
+? `<div class="agy-ta-acct-mini-pools">${miniChips.join('')}</div>`
+: '';
 return `
 <div class="agy-ta-row agy-ta-acct-row${isCurrent ? ' is-active' : ''}${isUnavailable ? ' is-disabled' : ''}">
 <div class="agy-ta-acct-top">
@@ -974,13 +993,13 @@ ${labelBadge}
 ${planBadge}
 ${statusTags}
 </div>
+${miniPoolsHtml}
 <div class="agy-ta-acct-actions">${actionHtml}</div>
 </div>
 <div class="agy-ta-acct-quotas">
 ${fiveBar}
 ${weekBar}
 </div>
-${secondaryHtml}
 </div>
 `;
 }).join('');
@@ -1019,6 +1038,7 @@ accountsLoading = false;
 accountsRefreshing = false;
 if (!res || typeof res !== 'object' || !res.available) {
 accountsAvailable = false;
+accountsCanSync = false;
 accountsList = [];
 accountsCurrentId = null;
 accountsPendingConfirmId = null;
@@ -1026,6 +1046,9 @@ accountsPendingConfirmType = null;
 stopAccountAddFlow(false);
 renderActivityModalData();
 return;
+}
+if (Array.isArray(res.capabilities)) {
+accountsCanSync = res.capabilities.includes('sync');
 }
 const nextAccounts = Array.isArray(res.accounts) ? res.accounts : [];
 const prevIdsKey = accountsList.map((a) => `${a.id}:${a.lastUpdated}:${a.isCurrent}`).join('|');
@@ -1047,6 +1070,10 @@ accountsStatusMsg = `已刷新 ${Number(s.success) || 0}/${Number(s.total) || ac
 }
 renderActivityModalData();
 renderAccountsSection();
+if (accountsCanSync && !accountsAutoSyncedOnce && !forceRemote && !watchOnly) {
+accountsAutoSyncedOnce = true;
+void syncCurrentAccount(false);
+}
 }
 catch {
 if (!activityModalOpen || seq !== accountsFetchSeq) {
@@ -1056,6 +1083,80 @@ accountsLoading = false;
 accountsRefreshing = false;
 if (forceRemote) {
 accountsErrorMsg = '刷新额度失败，请稍后重试或检查网络代理';
+renderAccountsSection();
+}
+}
+}
+async function syncCurrentAccount(manual) {
+if (!activityModalOpen || accountsSyncing || accountsSwitchingId || accountsDeletingId || accountsAddState !== 'idle') {
+return;
+}
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+return;
+}
+accountsSyncing = true;
+if (manual) {
+accountsErrorMsg = '';
+accountsStatusMsg = '';
+renderAccountsSection();
+}
+try {
+const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-sync');
+if (!activityModalOpen) {
+accountsSyncing = false;
+return;
+}
+accountsSyncing = false;
+if (!res || typeof res !== 'object' || !res.available) {
+if (manual) {
+accountsErrorMsg = (res && typeof res.error === 'string' && res.error) ? res.error : '同步当前登录账号失败';
+renderAccountsSection();
+}
+return;
+}
+if (Array.isArray(res.capabilities)) {
+accountsCanSync = res.capabilities.includes('sync');
+}
+accountsAvailable = true;
+if (Array.isArray(res.accounts)) {
+accountsList = res.accounts;
+accountsCurrentId = typeof res.currentId === 'string' ? res.currentId : null;
+}
+const syncedEmail = typeof res.syncedEmail === 'string' ? res.syncedEmail : '';
+if (res.imported) {
+accountsErrorMsg = '';
+accountsStatusMsg = syncedEmail ? `✓ 已自动导入当前登录账号：${syncedEmail}` : '✓ 已自动导入当前登录账号';
+}
+else if (res.changed) {
+accountsErrorMsg = '';
+accountsStatusMsg = syncedEmail ? `已对齐当前登录账号：${syncedEmail}` : '已对齐当前登录账号';
+}
+else if (manual) {
+if (res.error) {
+accountsStatusMsg = '';
+accountsErrorMsg = res.error;
+}
+else if (res.synced && syncedEmail) {
+accountsErrorMsg = '';
+accountsStatusMsg = `当前登录账号已同步：${syncedEmail}`;
+}
+else {
+accountsErrorMsg = '';
+accountsStatusMsg = '未检测到已登录的 Antigravity 账号会话';
+}
+}
+renderActivityModalData();
+renderAccountsSection();
+}
+catch {
+if (!activityModalOpen) {
+accountsSyncing = false;
+return;
+}
+accountsSyncing = false;
+if (manual) {
+accountsStatusMsg = '';
+accountsErrorMsg = '同步当前登录账号失败，请稍后重试';
 renderAccountsSection();
 }
 }
@@ -1408,6 +1509,8 @@ accountsPendingConfirmType = null;
 accountsSwitchingId = null;
 accountsDeletingId = null;
 accountsRefreshing = false;
+accountsSyncing = false;
+accountsAutoSyncedOnce = false;
 accountsErrorMsg = '';
 accountsStatusMsg = '';
 stopAccountAddFlow(true);
@@ -1562,27 +1665,14 @@ overlay.innerHTML = `
 <div class="agy-ta-breakdown-list" data-role="ta-bd-list"></div>
 </div>
 <div class="agy-ta-accounts-section" data-role="ta-accounts-section" hidden>
-<div class="agy-ta-acct-summary">
-<div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">当前激活账号</span></div>
-<div class="agy-ta-kpi-val is-compact" data-role="acct-kpi-current-val">--</div>
-<div class="agy-ta-kpi-sub" data-role="acct-kpi-current-sub">读取中...</div>
-</div>
-<div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">已保存账号</span></div>
-<div class="agy-ta-kpi-val" data-role="acct-kpi-count-val">0 个</div>
-<div class="agy-ta-kpi-sub" data-role="acct-kpi-count-sub">尚未添加任何账号</div>
-</div>
-<div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">最高可用 Gemini 5h</span></div>
-<div class="agy-ta-kpi-val" data-role="acct-kpi-5h-val">--</div>
-<div class="agy-ta-kpi-sub" data-role="acct-kpi-5h-sub">点击刷新额度获取</div>
-</div>
-<div class="agy-ta-kpi">
-<div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">最高可用 Gemini 周额度</span></div>
-<div class="agy-ta-kpi-val" data-role="acct-kpi-week-val">--</div>
-<div class="agy-ta-kpi-sub" data-role="acct-kpi-week-sub">后台静默驱动</div>
-</div>
+<div class="agy-ta-acct-summary-bar">
+<span class="agy-ta-acct-sum-item is-primary"><span class="agy-ta-acct-sum-dot"></span><span class="agy-ta-acct-sum-lbl">当前</span><span class="agy-ta-acct-sum-val agy-ta-ellipsis" data-role="acct-kpi-current-val">--</span></span>
+<span class="agy-ta-acct-sum-sep"></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">账号</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-count-val">0</span></span>
+<span class="agy-ta-acct-sum-sep"></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">最高 5h</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-5h-val">--</span></span>
+<span class="agy-ta-acct-sum-sep"></span>
+<span class="agy-ta-acct-sum-item"><span class="agy-ta-acct-sum-lbl">最高周</span><span class="agy-ta-acct-sum-val" data-role="acct-kpi-week-val">--</span></span>
 </div>
 <div class="agy-ta-acct-panel">
 <div class="agy-ta-section-head">
@@ -1592,6 +1682,7 @@ overlay.innerHTML = `
 </div>
 <div class="agy-ta-acct-head-actions">
 <button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add">+ 添加账号</button>
+<button type="button" class="agy-ta-acct-btn" data-action="acct-sync-live" hidden>同步当前</button>
 <button type="button" class="agy-ta-acct-btn" data-action="acct-refresh">刷新额度</button>
 </div>
 </div>
@@ -1678,6 +1769,9 @@ stopAccountAddFlow(true);
 accountsStatusMsg = '';
 accountsErrorMsg = '';
 renderAccountsSection();
+}
+else if (action === 'acct-sync-live') {
+void syncCurrentAccount(true);
 }
 else if (action === 'acct-refresh') {
 void refreshAccountsList(true);
@@ -1778,7 +1872,7 @@ if (accountsAddState !== 'idle') {
 void pollAccountAddStatus();
 return;
 }
-if (!accountsSwitchingId && !accountsDeletingId && !accountsRefreshing) {
+if (!accountsSwitchingId && !accountsDeletingId && !accountsRefreshing && !accountsSyncing) {
 void refreshAccountsList(false, { watchOnly: true });
 }
 };

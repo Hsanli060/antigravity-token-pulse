@@ -242,6 +242,7 @@ async function runTests() {
       ipcRaw
     );
     assert(patchedIpc.includes('telemetry:accounts-list'));
+    assert(patchedIpc.includes('telemetry:accounts-sync'));
     assert(patchedIpc.includes('telemetry:accounts-refresh'));
     assert(patchedIpc.includes('telemetry:accounts-switch'));
     assert(patchedIpc.includes('telemetry:accounts-add'));
@@ -256,6 +257,7 @@ async function runTests() {
       preloadCombined
     );
     assert(patchedPreload.includes('ta-tab-accounts'));
+    assert(patchedPreload.includes('telemetry:accounts-sync'));
     assert(patchedPreload.includes('telemetry:accounts-switch'));
     assert(patchedPreload.includes('telemetry:accounts-add'));
     assert(patchedPreload.includes('telemetry:accounts-add-status'));
@@ -315,6 +317,8 @@ async function runTests() {
       for (const evt of badEvents) {
         const r1 = await handlers.get('telemetry:accounts-list')(evt);
         assert.strictEqual(r1.available, false);
+        const r1s = await handlers.get('telemetry:accounts-sync')(evt);
+        assert.strictEqual(r1s.available, false);
         const r2 = await handlers.get('telemetry:accounts-refresh')(evt);
         assert.strictEqual(r2.refreshed, false);
         const r3 = await handlers.get('telemetry:accounts-switch')(evt, 'acct_backup_02');
@@ -354,6 +358,10 @@ async function runTests() {
         envOverrides: { ANTIGRAVITY_SWITCH_CLI: '', PATH: '' },
         execFileImpl: (file, args, opts, cb) => {
           calls.push({ file, args, opts });
+          if (args[0] === '--version') {
+            cb(null, JSON.stringify({ name: 'agy-switch', version: '4.10.18' }), '');
+            return;
+          }
           cb(null, JSON.stringify(SAMPLE_LIST_PAYLOAD), '');
         },
         spawnImpl: () => { throw new Error('unexpected spawn'); },
@@ -364,11 +372,13 @@ async function runTests() {
       assert.strictEqual(res.error, null);
       assert.strictEqual(res.currentId, 'acct_main_01');
       assert.strictEqual(res.accounts.length, 3);
-      assert.strictEqual(calls.length, 1);
-      assert.strictEqual(path.resolve(calls[0].file), path.resolve(fakeCli));
-      assert.deepStrictEqual(Array.from(calls[0].args), ['accounts', 'list', '--json']);
-      assert.strictEqual(calls[0].opts.shell, false);
-      assert.strictEqual(calls[0].opts.windowsHide, true);
+      assert.deepStrictEqual(Array.from(res.capabilities), []);
+      const listCall = calls.find((c) => c.args[0] === 'accounts');
+      assert(listCall, 'expected accounts list call');
+      assert.strictEqual(path.resolve(listCall.file), path.resolve(fakeCli));
+      assert.deepStrictEqual(Array.from(listCall.args), ['accounts', 'list', '--json']);
+      assert.strictEqual(listCall.opts.shell, false);
+      assert.strictEqual(listCall.opts.windowsHide, true);
 
       const main = res.accounts[0];
       assert.strictEqual(main.plan, 'PRO');
@@ -516,16 +526,21 @@ async function runTests() {
     assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
     assert(combined.includes('data-role="ta-acct-pill" hidden'));
     assert(combined.includes('data-role="ta-accounts-section" hidden'));
-    // Verify inline two-step confirmation and silent browser OAuth controls exist
+    // Verify inline two-step confirmation, sync-live, and silent browser OAuth controls exist
     assert(combined.includes('data-action="acct-add"'));
     assert(combined.includes('data-action="acct-add-open"'));
     assert(combined.includes('data-action="acct-add-copy"'));
     assert(combined.includes('data-action="acct-add-cancel"'));
+    assert(combined.includes('data-action="acct-sync-live" hidden'));
     assert(combined.includes('data-action="acct-switch"'));
     assert(combined.includes('data-action="acct-confirm"'));
     assert(combined.includes('data-action="acct-delete"'));
     assert(combined.includes('data-action="acct-delete-confirm"'));
     assert(combined.includes('data-action="acct-cancel"'));
+    // Verify compact 1-line summary bar + compact 2-row account strip classes
+    assert(combined.includes('agy-ta-acct-summary-bar'));
+    assert(combined.includes('agy-ta-acct-mini-pools'));
+    assert(combined.includes('agy-ta-qbar'));
     // Verify unified fixed panel geometry anchored to Daily view
     assert(combined.includes('width: min(860px, 94vw);'));
     assert(combined.includes('height: min(656px, 90vh);'));
@@ -547,6 +562,10 @@ async function runTests() {
     assert(html.includes('&lt;img src=x onerror=1&gt;'));
     assert(!html.includes('<img '));
     assert(html.includes('65%'));
+    const compactHtml = helperCtx.renderQuotaBarHtml('Gemini 5h 额度', { pct: 78, resetTime: new Date(Date.now() + 17400000).toISOString() }, '5h');
+    assert(compactHtml.includes('agy-ta-qbar'));
+    assert(compactHtml.includes('>5h<'));
+    assert(compactHtml.includes('78%'));
     assert.strictEqual(helperCtx.getQuotaBarColor(75), 'var(--agy-ta-q-good)');
     assert.strictEqual(helperCtx.getQuotaBarColor(30), 'var(--agy-ta-q-warn)');
     assert.strictEqual(helperCtx.getQuotaBarColor(10), 'var(--agy-ta-q-low)');
@@ -581,7 +600,11 @@ async function runTests() {
         homeDir: tmpHome,
         envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
         shellOpenImpl: async (u) => { openedUrls.push(u); },
-        execFileImpl: (_file, _args, _opts, cb) => {
+        execFileImpl: (_file, args, _opts, cb) => {
+          if (args[0] === '--version') {
+            cb(null, JSON.stringify({ name: 'agy-switch', version: '4.10.18' }), '');
+            return;
+          }
           listCallCount += 1;
           const accounts = listCallCount <= 1
             ? [SAMPLE_LIST_PAYLOAD.accounts[0]]
@@ -674,7 +697,11 @@ async function runTests() {
       const handlers = loadIpcBlockSandbox({
         homeDir: tmpHome,
         envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, ABV_DATA_DIR: '', PATH: '' },
-        execFileImpl: (_file, _args, _opts, cb) => {
+        execFileImpl: (_file, args, _opts, cb) => {
+          if (args[0] === '--version') {
+            cb(null, JSON.stringify({ name: 'agy-switch', version: '4.10.18' }), '');
+            return;
+          }
           const curIdx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
           cb(null, JSON.stringify({
             schema_version: 1,
@@ -718,6 +745,108 @@ async function runTests() {
       assert.strictEqual(updatedIndex.current_vscode_account_id, undefined);
       assert.strictEqual(fs.existsSync(mainFile), false);
       assert.strictEqual(fs.existsSync(backupFile), true);
+    } finally {
+      removeDirSafe(tmpHome);
+    }
+  });
+
+  await runCase('12. Native agy-switch-lite capabilities (sync single-flight, native add --json, native delete --json)', async () => {
+    const tmpHome = createTempDir('agy-tp-lite-');
+    const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
+    fs.writeFileSync(fakeCli, 'dummy-lite');
+    const sampleAuthUrl = 'https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A54322%2Foauth-callback&state=lite-state';
+    try {
+      const execArgs = [];
+      const spawns = [];
+      let currentAccounts = [SAMPLE_LIST_PAYLOAD.accounts[0], SAMPLE_LIST_PAYLOAD.accounts[1]];
+
+      const handlers = loadIpcBlockSandbox({
+        homeDir: tmpHome,
+        envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
+        execFileImpl: (_file, args, _opts, cb) => {
+          execArgs.push(args.join(' '));
+          setTimeout(() => {
+            if (args[0] === '--version') {
+              cb(null, JSON.stringify({
+                name: 'agy-switch',
+                version: '4.10.18-lite',
+                schema_version: 1,
+                capabilities: ['sync', 'add', 'delete', 'refresh', 'switch'],
+              }), '');
+              return;
+            }
+            if (args[0] === 'sync') {
+              cb(null, JSON.stringify({
+                schema_version: 1,
+                synced: true,
+                imported: true,
+                changed: true,
+                email: 'alpha@example.com',
+                account_id: 'acct_main_01',
+              }), '');
+              return;
+            }
+            if (args[0] === 'delete') {
+              const delId = args[1];
+              currentAccounts = currentAccounts.filter((a) => a.id !== delId);
+              cb(null, JSON.stringify({ schema_version: 1, deleted: true, account_id: delId }), '');
+              return;
+            }
+            cb(null, JSON.stringify({ schema_version: 1, current_target: 'app', accounts: currentAccounts }), '');
+          }, 15);
+        },
+        spawnImpl: (file, args, opts) => {
+          const child = new EventEmitter();
+          child.stdout = new EventEmitter();
+          child.stderr = new EventEmitter();
+          child.killed = false;
+          child.stdin = { destroyed: false, write() {}, end() { this.destroyed = true; } };
+          child.kill = () => { child.killed = true; };
+          spawns.push({ file, args, opts, child });
+          setTimeout(() => {
+            child.stdout.emit('data', JSON.stringify({ event: 'auth_url', url: sampleAuthUrl }) + '\n');
+          }, 10);
+          return child;
+        },
+      });
+
+      // 1) accounts-list reports native capabilities
+      const listRes = await handlers.get('telemetry:accounts-list')(TRUSTED_EVENT);
+      assert.strictEqual(listRes.available, true);
+      assert(Array.isArray(listRes.capabilities) && listRes.capabilities.includes('sync'));
+      assert(listRes.capabilities.includes('add') && listRes.capabilities.includes('delete'));
+
+      // 2) accounts-sync deduplicates concurrent calls via single-flight
+      execArgs.length = 0;
+      const [s1, s2] = await Promise.all([
+        handlers.get('telemetry:accounts-sync')(TRUSTED_EVENT),
+        handlers.get('telemetry:accounts-sync')(TRUSTED_EVENT),
+      ]);
+      assert.strictEqual(s1.synced, true);
+      assert.strictEqual(s1.imported, true);
+      assert.strictEqual(s1.changed, true);
+      assert.strictEqual(s1.syncedEmail, 'alpha@example.com');
+      assert.strictEqual(s2.synced, true);
+      assert.deepStrictEqual(execArgs, ['sync --json', 'accounts list --json']);
+
+      // 3) accounts-add spawns agy-switch directly with ['add', '--json'] (zero PowerShell/PTY)
+      const addRes = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(addRes.ok, true);
+      assert.strictEqual(addRes.state, 'waiting_browser');
+      assert.strictEqual(spawns.length, 1);
+      assert.strictEqual(path.resolve(spawns[0].file), path.resolve(fakeCli));
+      assert.deepStrictEqual(Array.from(spawns[0].args), ['add', '--json']);
+      assert.strictEqual(spawns[0].opts.windowsHide, true);
+      assert.strictEqual(spawns[0].opts.shell, false);
+      await handlers.get('telemetry:accounts-add-cancel')(TRUSTED_EVENT);
+
+      // 4) accounts-delete uses native `delete <id> --json` directly
+      execArgs.length = 0;
+      const delRes = await handlers.get('telemetry:accounts-delete')(TRUSTED_EVENT, 'acct_backup_02');
+      assert.strictEqual(delRes.ok, true);
+      assert.strictEqual(delRes.deletedId, 'acct_backup_02');
+      assert.strictEqual(delRes.accounts.length, 1);
+      assert.deepStrictEqual(execArgs, ['delete acct_backup_02 --json', 'accounts list --json']);
     } finally {
       removeDirSafe(tmpHome);
     }

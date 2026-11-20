@@ -1192,38 +1192,80 @@ border-color: var(--agy-ta-tab-active-border);
 #${MODAL_ID} .agy-ta-acct-pill[hidden],
 #${MODAL_ID} .agy-ta-tab[hidden],
 #${MODAL_ID} .agy-ta-accounts-section[hidden],
-#${MODAL_ID} .agy-ta-acct-notice[hidden] {
+#${MODAL_ID} .agy-ta-acct-notice[hidden],
+#${MODAL_ID} .agy-ta-acct-btn[hidden] {
 display: none !important;
 }
 #${MODAL_ID} .agy-ta-accounts-section {
-margin-top: 16px;
+margin-top: 12px;
 flex: 1 1 0;
 min-height: 0;
 overflow: hidden;
 display: flex;
 flex-direction: column;
-gap: 14px;
-}
-#${MODAL_ID} .agy-ta-acct-summary {
-display: grid;
-grid-template-columns: repeat(4, minmax(0, 1fr));
 gap: 10px;
+}
+#${MODAL_ID} .agy-ta-acct-summary-bar {
+display: flex;
+align-items: center;
+gap: 10px;
+padding: 7px 12px;
+border-radius: 9px;
+background: var(--agy-ta-kpi-bg);
+border: 1px solid var(--agy-ta-kpi-border);
+flex-shrink: 0;
+min-width: 0;
+overflow: hidden;
+font-size: 11.5px;
+}
+#${MODAL_ID} .agy-ta-acct-sum-item {
+display: inline-flex;
+align-items: center;
+gap: 5px;
+min-width: 0;
+flex-shrink: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-acct-sum-item.is-primary {
+flex: 1 1 auto;
+min-width: 0;
+overflow: hidden;
+}
+#${MODAL_ID} .agy-ta-acct-sum-dot {
+width: 6px;
+height: 6px;
+border-radius: 50%;
+background: var(--agy-ta-q-good);
 flex-shrink: 0;
 }
-#${MODAL_ID} .agy-ta-acct-summary .agy-ta-kpi-val.is-compact {
-font-size: 14px;
+#${MODAL_ID} .agy-ta-acct-sum-lbl {
+color: var(--agy-ta-kpi-label);
+font-size: 11px;
+flex-shrink: 0;
+}
+#${MODAL_ID} .agy-ta-acct-sum-val {
+color: var(--agy-ta-kpi-val);
 font-weight: 600;
-line-height: 1.55;
+min-width: 0;
+}
+#${MODAL_ID} .agy-ta-acct-sum-sep {
+width: 1px;
+height: 12px;
+background: var(--agy-ta-divider);
+flex-shrink: 0;
 }
 #${MODAL_ID} .agy-ta-acct-panel {
-padding-top: 14px;
+padding-top: 10px;
 border-top: 1px solid var(--agy-ta-divider);
 flex: 1 1 0;
 min-height: 0;
 overflow: hidden;
 display: flex;
 flex-direction: column;
-gap: 10px;
+gap: 8px;
+}
+#${MODAL_ID} .agy-ta-acct-panel > .agy-ta-section-head {
+margin-bottom: 0;
 }
 #${MODAL_ID} .agy-ta-acct-head-left {
 display: flex;
@@ -1343,7 +1385,7 @@ overflow-y: auto;
 scrollbar-gutter: stable;
 display: flex;
 flex-direction: column;
-gap: 8px;
+gap: 6px;
 padding-right: 4px;
 }
 #${MODAL_ID} .agy-ta-acct-foot {
@@ -1352,7 +1394,7 @@ align-items: center;
 justify-content: space-between;
 gap: 10px;
 flex-shrink: 0;
-padding-top: 8px;
+padding-top: 7px;
 border-top: 1px solid var(--agy-ta-divider);
 font-size: 11px;
 color: var(--agy-ta-muted);
@@ -1363,44 +1405,45 @@ flex-shrink: 0;
 white-space: nowrap;
 }
 #${MODAL_ID} .agy-ta-acct-row {
-gap: 8px;
-padding: 10px 12px;
+gap: 5px;
+padding: 7px 11px;
+border-radius: 8px;
 }
 #${MODAL_ID} .agy-ta-acct-row.is-active {
 border-color: var(--agy-ta-tab-active-border);
 background: var(--agy-ta-panel-bg);
 }
 #${MODAL_ID} .agy-ta-acct-row.is-disabled {
-opacity: 0.65;
+opacity: 0.62;
 }
 #${MODAL_ID} .agy-ta-acct-top {
 display: flex;
 align-items: center;
 justify-content: space-between;
-gap: 10px;
+gap: 8px;
 min-width: 0;
 }
 #${MODAL_ID} .agy-ta-acct-identity {
 display: flex;
 align-items: center;
-gap: 6px;
+gap: 5px;
 min-width: 0;
 flex: 1 1 auto;
 }
 #${MODAL_ID} .agy-ta-acct-email {
-font-size: 12.5px;
+font-size: 12px;
 font-weight: 600;
 color: var(--agy-ta-row-name-fg);
 min-width: 0;
 }
 #${MODAL_ID} .agy-ta-acct-label {
-font-size: 10.5px;
-padding: 1px 6px;
-border-radius: 5px;
+font-size: 10px;
+padding: 1px 5px;
+border-radius: 4px;
 background: var(--agy-ta-tabs-bg);
 border: 1px solid var(--agy-ta-tabs-border);
 color: var(--agy-ta-row-sub-fg);
-max-width: 120px;
+max-width: 96px;
 flex-shrink: 0;
 }
 #${MODAL_ID} .agy-ta-acct-tag-warn {
@@ -1411,35 +1454,102 @@ color: var(--agy-ta-warn-fg);
 background: var(--agy-ta-danger-bg);
 color: var(--agy-ta-danger-fg);
 }
-#${MODAL_ID} .agy-ta-acct-actions {
+#${MODAL_ID} .agy-ta-acct-mini-pools {
 display: inline-flex;
 align-items: center;
-gap: 6px;
+gap: 5px;
 flex-shrink: 0;
 white-space: nowrap;
 }
-#${MODAL_ID} .agy-ta-acct-confirm-hint {
+#${MODAL_ID} .agy-ta-acct-mini-chip {
+display: inline-flex;
+align-items: center;
+gap: 3px;
+font-size: 10.5px;
+padding: 1px 6px;
+border-radius: 5px;
+background: var(--agy-ta-tabs-bg);
+border: 1px solid var(--agy-ta-tabs-border);
+color: var(--agy-ta-row-sub-fg);
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-acct-mini-chip b {
+font-weight: 600;
+color: var(--agy-ta-comp-val-fg);
+}
+#${MODAL_ID} .agy-ta-acct-actions {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+flex-shrink: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-acct-actions .agy-ta-acct-btn {
 font-size: 11px;
+padding: 2px 8px;
+border-radius: 5px;
+line-height: 1.35;
+}
+#${MODAL_ID} .agy-ta-acct-actions .agy-ta-acct-btn-ghost-danger {
+padding: 2px 6px;
+}
+#${MODAL_ID} .agy-ta-acct-confirm-hint {
+font-size: 10.5px;
 color: var(--agy-ta-warn-fg);
 }
 #${MODAL_ID} .agy-ta-acct-state-lbl {
-font-size: 11px;
+font-size: 10.5px;
 color: var(--agy-ta-muted);
-padding: 2px 4px;
+padding: 1px 4px;
 }
 #${MODAL_ID} .agy-ta-acct-quotas {
 display: grid;
 grid-template-columns: repeat(2, minmax(0, 1fr));
 gap: 12px;
 }
-#${MODAL_ID} .agy-ta-acct-secondary {
+#${MODAL_ID} .agy-ta-qbar {
 display: flex;
 align-items: center;
-justify-content: space-between;
-gap: 8px;
+gap: 7px;
+min-width: 0;
+font-size: 11px;
+}
+#${MODAL_ID} .agy-ta-qbar-lbl {
+color: var(--agy-ta-comp-head-fg);
 font-size: 10.5px;
+width: 18px;
+flex-shrink: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-qbar-track {
+flex: 1 1 auto;
+min-width: 48px;
+height: 4px;
+border-radius: 999px;
+background: var(--agy-ta-track-bg);
+overflow: hidden;
+}
+#${MODAL_ID} .agy-ta-qbar-fill {
+height: 100%;
+border-radius: 999px;
+transition: width 0.2s ease;
+}
+#${MODAL_ID} .agy-ta-qbar-val {
+color: var(--agy-ta-comp-val-fg);
+font-weight: 600;
+font-size: 11px;
+width: 30px;
+text-align: right;
+flex-shrink: 0;
+white-space: nowrap;
+}
+#${MODAL_ID} .agy-ta-qbar-reset {
 color: var(--agy-ta-muted);
-padding-top: 2px;
+font-size: 10.5px;
+min-width: 44px;
+text-align: right;
+flex-shrink: 0;
+white-space: nowrap;
 }
 #${MODAL_ID} .agy-ta-tooltip {
 position: fixed;
@@ -1481,9 +1591,15 @@ text-overflow: ellipsis;
 #${MODAL_ID} .agy-ta-card {
 overflow-y: auto;
 }
-#${MODAL_ID} .agy-ta-kpis,
-#${MODAL_ID} .agy-ta-acct-summary {
+#${MODAL_ID} .agy-ta-kpis {
 grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+#${MODAL_ID} .agy-ta-acct-summary-bar {
+flex-wrap: wrap;
+row-gap: 4px;
+}
+#${MODAL_ID} .agy-ta-acct-mini-pools {
+display: none;
 }
 #${MODAL_ID} .agy-ta-total-grid,
 #${MODAL_ID} .agy-ta-acct-quotas {
@@ -1786,10 +1902,13 @@ let activityRenderedTodayKey = null;
 let activityHoveredDate = null;
 let activityHoveredCell = null;
 let accountsAvailable = false;
+let accountsCanSync = false;
 let accountsList = [];
 let accountsCurrentId = null;
 let accountsLoading = false;
 let accountsRefreshing = false;
+let accountsSyncing = false;
+let accountsAutoSyncedOnce = false;
 let accountsSwitchingId = null;
 let accountsDeletingId = null;
 let accountsPendingConfirmId = null;
