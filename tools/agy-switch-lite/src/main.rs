@@ -325,45 +325,92 @@ async fn cmd_refresh(root: &Path, selector: Option<&str>) -> Result<serde_json::
     }
 
     let total = targets.len();
-    let mut success = 0usize;
-    let mut failed = 0usize;
-    let mut details = Vec::new();
+    // Pre-warm OAuth client cache once before fanning out concurrently if any token needs refresh
+    let needs_oauth_warm = targets.iter().any(|a| {
+        !a.disabled
+            && (a.token.expiry_timestamp <= now_unix() + 900
+                || a.token.access_token.trim().is_empty())
+    });
+    if needs_oauth_warm {
+        let _ = oauth::resolve_oauth_client(root, None, None).await;
+    }
 
-    for mut acc in targets {
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
+    let root_buf = root.to_path_buf();
+    let mut set = tokio::task::JoinSet::new();
+
+    for (idx, mut acc) in targets.into_iter().enumerate() {
         if acc.disabled {
-            details.push(json!({ "id": acc.id, "email": acc.email, "ok": false, "reason": "disabled" }));
-            failed += 1;
+            set.spawn(async move {
+                (
+                    idx,
+                    false,
+                    json!({ "id": acc.id, "email": acc.email, "ok": false, "reason": "disabled" }),
+                )
+            });
             continue;
         }
-        match oauth::ensure_fresh_token(root, &acc.token).await {
-            Ok(fresh) => {
-                acc.token = fresh;
-                match quota::fetch_quota(&acc.token.access_token, acc.token.project_id.as_deref()).await {
-                    Ok((mut q, pid)) => {
-                        if let Some(prev) = acc.quota.as_ref() {
-                            if q.subscription_tier.is_none() {
-                                q.subscription_tier = prev.subscription_tier.clone();
+        let sem_clone = sem.clone();
+        let root_clone = root_buf.clone();
+        set.spawn(async move {
+            let _permit = sem_clone.acquire_owned().await;
+            match oauth::ensure_fresh_token(&root_clone, &acc.token).await {
+                Ok(fresh) => {
+                    acc.token = fresh;
+                    match quota::fetch_quota(&acc.token.access_token, acc.token.project_id.as_deref())
+                        .await
+                    {
+                        Ok((mut q, pid)) => {
+                            if let Some(prev) = acc.quota.as_ref() {
+                                if q.subscription_tier.is_none() {
+                                    q.subscription_tier = prev.subscription_tier.clone();
+                                }
                             }
+                            if pid.is_some() {
+                                acc.token.project_id = pid;
+                            }
+                            acc.quota = Some(q);
+                            let _ = store::save_account(&root_clone, &acc);
+                            (
+                                idx,
+                                true,
+                                json!({ "id": acc.id, "email": acc.email, "ok": true }),
+                            )
                         }
-                        if pid.is_some() {
-                            acc.token.project_id = pid;
-                        }
-                        acc.quota = Some(q);
-                        let _ = store::save_account(root, &acc);
-                        success += 1;
-                        details.push(json!({ "id": acc.id, "email": acc.email, "ok": true }));
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        details.push(json!({ "id": acc.id, "email": acc.email, "ok": false, "error": e }));
+                        Err(e) => (
+                            idx,
+                            false,
+                            json!({ "id": acc.id, "email": acc.email, "ok": false, "error": e }),
+                        ),
                     }
                 }
+                Err(e) => (
+                    idx,
+                    false,
+                    json!({ "id": acc.id, "email": acc.email, "ok": false, "error": e }),
+                ),
             }
-            Err(e) => {
-                failed += 1;
-                details.push(json!({ "id": acc.id, "email": acc.email, "ok": false, "error": e }));
-            }
+        });
+    }
+
+    let mut ordered: Vec<(usize, bool, serde_json::Value)> = Vec::with_capacity(total);
+    while let Some(res) = set.join_next().await {
+        if let Ok(item) = res {
+            ordered.push(item);
         }
+    }
+    ordered.sort_by_key(|(idx, _, _)| *idx);
+
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    let mut details = Vec::with_capacity(ordered.len());
+    for (_, ok, detail) in ordered {
+        if ok {
+            success += 1;
+        } else {
+            failed += 1;
+        }
+        details.push(detail);
     }
 
     Ok(json!({

@@ -1,5 +1,5 @@
 use crate::models::{now_unix, ModelQuota, QuotaBucket, QuotaData, QuotaGroup};
-use crate::oauth::{build_http_client, hub_user_agent};
+use crate::oauth::{hub_user_agent, shared_http_client};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -127,17 +127,17 @@ fn extract_subscription_tier(data: &LoadProjectResponse) -> Option<String> {
     }
 }
 
-pub async fn fetch_project_and_tier(access_token: &str) -> (Option<String>, Option<String>) {
-    let Ok(client) = build_http_client(15) else {
-        return (None, None);
-    };
-    let ua = hub_user_agent();
+pub async fn fetch_project_and_tier(
+    client: &reqwest::Client,
+    access_token: &str,
+    ua: &str,
+) -> (Option<String>, Option<String>) {
     let meta = json!({"metadata": {"ideType": "ANTIGRAVITY"}});
     for ep in LOAD_PROJECT_ENDPOINTS {
         if let Ok(resp) = client
             .post(ep)
             .bearer_auth(access_token)
-            .header(reqwest::header::USER_AGENT, &ua)
+            .header(reqwest::header::USER_AGENT, ua)
             .json(&meta)
             .send()
             .await
@@ -248,15 +248,13 @@ async fn fetch_quota_summary(
     partial
 }
 
-pub async fn fetch_quota(
+async fn fetch_available_models(
+    client: &reqwest::Client,
     access_token: &str,
-    cached_project_id: Option<&str>,
-) -> Result<(QuotaData, Option<String>), String> {
-    let (fetched_pid, tier) = fetch_project_and_tier(access_token).await;
-    let project_id = fetched_pid.or_else(|| cached_project_id.map(str::to_string));
-    let client = build_http_client(20)?;
-    let ua = hub_user_agent();
-    let base_payload = if let Some(ref pid) = project_id {
+    project_id: Option<&str>,
+    ua: &str,
+) -> Result<QuotaData, String> {
+    let base_payload = if let Some(pid) = project_id.map(str::trim).filter(|s| !s.is_empty()) {
         json!({ "project": pid })
     } else {
         json!({})
@@ -271,7 +269,7 @@ pub async fn fetch_quota(
             match client
                 .post(*ep)
                 .bearer_auth(access_token)
-                .header(reqwest::header::USER_AGENT, &ua)
+                .header(reqwest::header::USER_AGENT, ua)
                 .json(&payload)
                 .send()
                 .await
@@ -289,8 +287,7 @@ pub async fn fetch_quota(
                         }
                         let mut q = QuotaData::new();
                         q.is_forbidden = true;
-                        q.subscription_tier = tier.clone();
-                        return Ok((q, project_id));
+                        return Ok(q);
                     }
                     if !status.is_success() {
                         last_err = format!("Quota API HTTP {status}");
@@ -305,7 +302,6 @@ pub async fn fetch_quota(
                         .map_err(|e| format!("Quota JSON parse failed: {e}"))?;
                     let mut q = QuotaData::new();
                     q.last_updated = now_unix();
-                    q.subscription_tier = tier.clone();
                     for (name, info) in parsed.models {
                         if !["gemini", "claude", "gpt", "image", "imagen"]
                             .iter()
@@ -328,10 +324,7 @@ pub async fn fetch_quota(
                                 .unwrap_or_default(),
                         });
                     }
-                    q.quota_groups =
-                        fetch_quota_summary(&client, access_token, project_id.as_deref(), &ua)
-                            .await;
-                    return Ok((q, project_id));
+                    return Ok(q);
                 }
                 Err(e) => {
                     last_err = format!("Quota network error: {e}");
@@ -341,4 +334,43 @@ pub async fn fetch_quota(
         }
     }
     Err(last_err)
+}
+
+pub async fn fetch_quota(
+    access_token: &str,
+    cached_project_id: Option<&str>,
+) -> Result<(QuotaData, Option<String>), String> {
+    let client = shared_http_client()?;
+    let ua = hub_user_agent();
+    let clean_cached = cached_project_id.map(str::trim).filter(|s| !s.is_empty());
+
+    if let Some(pid) = clean_cached {
+        // Fast path: cached project_id exists -> run all 3 Google APIs concurrently in 1 parallel RTT!
+        let ((fetched_pid, tier), models_res, groups) = tokio::join!(
+            fetch_project_and_tier(client, access_token, &ua),
+            fetch_available_models(client, access_token, Some(pid), &ua),
+            fetch_quota_summary(client, access_token, Some(pid), &ua),
+        );
+        let project_id = fetched_pid.or_else(|| Some(pid.to_string()));
+        let mut q = models_res?;
+        q.subscription_tier = tier;
+        if !q.is_forbidden {
+            q.quota_groups = groups;
+        }
+        return Ok((q, project_id));
+    }
+
+    // First-time account without cached project_id: resolve project_id first, then parallelize models + summary
+    let (fetched_pid, tier) = fetch_project_and_tier(client, access_token, &ua).await;
+    let project_id = fetched_pid;
+    let (models_res, groups) = tokio::join!(
+        fetch_available_models(client, access_token, project_id.as_deref(), &ua),
+        fetch_quota_summary(client, access_token, project_id.as_deref(), &ua),
+    );
+    let mut q = models_res?;
+    q.subscription_tier = tier;
+    if !q.is_forbidden {
+        q.quota_groups = groups;
+    }
+    Ok((q, project_id))
 }

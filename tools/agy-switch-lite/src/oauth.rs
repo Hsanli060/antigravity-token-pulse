@@ -324,11 +324,25 @@ pub fn hub_user_agent() -> String {
     format!("antigravity/hub/4.3.0 (os_type={os_type}; arch={arch})")
 }
 
+static SHARED_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
 pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
+        .pool_max_idle_per_host(8)
         .build()
         .map_err(|e| format!("Cannot build HTTP client: {e}"))
+}
+
+pub fn shared_http_client() -> Result<&'static reqwest::Client, String> {
+    if let Some(c) = SHARED_HTTP_CLIENT.get() {
+        return Ok(c);
+    }
+    let created = build_http_client(25)?;
+    let _ = SHARED_HTTP_CLIENT.set(created);
+    SHARED_HTTP_CLIENT
+        .get()
+        .ok_or_else(|| "Failed to initialize shared HTTP client".to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,7 +412,7 @@ pub async fn exchange_code(
     code: &str,
     redirect_uri: &str,
 ) -> Result<TokenResponse, String> {
-    let client = build_http_client(45)?;
+    let client = shared_http_client()?;
     let params = [
         ("client_id", client_id),
         ("client_secret", client_secret),
@@ -431,7 +445,7 @@ pub async fn refresh_access_token(
 ) -> Result<TokenResponse, String> {
     let (client_id, client_secret) =
         resolve_oauth_client(root, hint_id_token, Some(refresh_token)).await?;
-    let client = build_http_client(45)?;
+    let client = shared_http_client()?;
     let params = [
         ("client_id", client_id.as_str()),
         ("client_secret", client_secret.as_str()),
@@ -466,7 +480,7 @@ pub async fn refresh_access_token(
 }
 
 pub async fn get_user_info(access_token: &str) -> Result<UserInfo, String> {
-    let client = build_http_client(20)?;
+    let client = shared_http_client()?;
     let resp = client
         .get(USERINFO_URL)
         .bearer_auth(access_token)

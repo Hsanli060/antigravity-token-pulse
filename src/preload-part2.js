@@ -500,8 +500,10 @@ const mCache = Number(m && m.cache) || 0;
 const mOut = Number(m && m.out) || 0;
 const pct = totalModelSum > 0 ? (mTot / totalModelSum) * 100 : 0;
 const col = palette.getColor(name);
+const mPromptDenom = mIn + mCache;
+const mCacheRate = mPromptDenom > 0 ? ((mCache / mPromptDenom) * 100).toFixed(1) : '0.0';
 const stepsPart = m.steps ? ` · ${m.steps} 步` : '';
-const metaText = `输入 ${formatActivityTokens(mIn)} · 缓存 ${formatActivityTokens(mCache)} · 输出 ${formatActivityTokens(mOut)}${stepsPart}`;
+const metaText = `输入 ${formatActivityTokens(mIn)} · 缓存 ${formatActivityTokens(mCache)} (${mCacheRate}%) · 输出 ${formatActivityTokens(mOut)}${stepsPart}`;
 return `
 <div class="agy-ta-model-item">
 <div class="agy-ta-model-row-head">
