@@ -26,7 +26,7 @@ function removeDirSafe(dir) {
   } catch {}
 }
 
-function loadIpcBlockSandbox({ homeDir, envOverrides, execFileImpl, spawnImpl }) {
+function loadIpcBlockSandbox({ homeDir, envOverrides, execFileImpl, spawnImpl, shellOpenImpl }) {
   const handlers = new Map();
   const fakeIpcMain = {
     removeHandler(ch) {
@@ -36,7 +36,12 @@ function loadIpcBlockSandbox({ homeDir, envOverrides, execFileImpl, spawnImpl })
       handlers.set(ch, fn);
     },
   };
-  const fakeElectron = { ipcMain: fakeIpcMain };
+  const fakeElectron = {
+    ipcMain: fakeIpcMain,
+    shell: {
+      openExternal: shellOpenImpl || (async () => {}),
+    },
+  };
   const fakeOs = {
     ...os,
     homedir: () => homeDir,
@@ -240,6 +245,9 @@ async function runTests() {
     assert(patchedIpc.includes('telemetry:accounts-refresh'));
     assert(patchedIpc.includes('telemetry:accounts-switch'));
     assert(patchedIpc.includes('telemetry:accounts-add'));
+    assert(patchedIpc.includes('telemetry:accounts-add-status'));
+    assert(patchedIpc.includes('telemetry:accounts-add-cancel'));
+    assert(patchedIpc.includes('telemetry:accounts-add-open'));
     assert(patchedIpc.includes('telemetry:accounts-delete'));
 
     const preloadCombined = [p1, p2, p3].join('\n');
@@ -250,6 +258,9 @@ async function runTests() {
     assert(patchedPreload.includes('ta-tab-accounts'));
     assert(patchedPreload.includes('telemetry:accounts-switch'));
     assert(patchedPreload.includes('telemetry:accounts-add'));
+    assert(patchedPreload.includes('telemetry:accounts-add-status'));
+    assert(patchedPreload.includes('telemetry:accounts-add-cancel'));
+    assert(patchedPreload.includes('telemetry:accounts-add-open'));
     assert(patchedPreload.includes('telemetry:accounts-delete'));
   });
 
@@ -310,6 +321,12 @@ async function runTests() {
         assert.strictEqual(r3.ok, false);
         const r4 = await handlers.get('telemetry:accounts-add')(evt);
         assert.strictEqual(r4.ok, false);
+        const r4s = await handlers.get('telemetry:accounts-add-status')(evt);
+        assert.strictEqual(r4s.active, false);
+        const r4c = await handlers.get('telemetry:accounts-add-cancel')(evt);
+        assert.strictEqual(r4c.ok, false);
+        const r4o = await handlers.get('telemetry:accounts-add-open')(evt);
+        assert.strictEqual(r4o.ok, false);
         const r5 = await handlers.get('telemetry:accounts-delete')(evt, 'acct_backup_02');
         assert.strictEqual(r5.ok, false);
       }
@@ -499,8 +516,11 @@ async function runTests() {
     assert(combined.includes('data-tab="accounts" data-role="ta-tab-accounts" hidden'));
     assert(combined.includes('data-role="ta-acct-pill" hidden'));
     assert(combined.includes('data-role="ta-accounts-section" hidden'));
-    // Verify inline two-step confirmation markup exists (no accidental 1-click restart or delete)
+    // Verify inline two-step confirmation and silent browser OAuth controls exist
     assert(combined.includes('data-action="acct-add"'));
+    assert(combined.includes('data-action="acct-add-open"'));
+    assert(combined.includes('data-action="acct-add-copy"'));
+    assert(combined.includes('data-action="acct-add-cancel"'));
     assert(combined.includes('data-action="acct-switch"'));
     assert(combined.includes('data-action="acct-confirm"'));
     assert(combined.includes('data-action="acct-delete"'));
@@ -532,42 +552,93 @@ async function runTests() {
     assert.strictEqual(helperCtx.getQuotaBarColor(10), 'var(--agy-ta-q-low)');
   });
 
-  await runCase('10. accounts-add launches external interactive CLI safely without shell injection', async () => {
+  await runCase('10. Silent background ConPTY/PTY accounts-add lifecycle (auth_url -> open -> success & cancel)', async () => {
     const tmpHome = createTempDir('agy-tp-add-');
     const fakeCli = path.join(tmpHome, process.platform === 'win32' ? 'agy-switch.exe' : 'agy-switch');
     fs.writeFileSync(fakeCli, 'dummy');
+    const sampleAuthUrl = 'https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Foauth-callback&state=test-state-123';
     try {
+      let listCallCount = 0;
       const spawns = [];
+      const openedUrls = [];
+      const makeMockChild = () => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.killed = false;
+        const writes = [];
+        child.stdin = {
+          destroyed: false,
+          write(txt) { writes.push(String(txt)); },
+          end() { this.destroyed = true; },
+        };
+        child.kill = () => { child.killed = true; };
+        child._writes = writes;
+        return child;
+      };
+
       const handlers = loadIpcBlockSandbox({
         homeDir: tmpHome,
         envOverrides: { ANTIGRAVITY_SWITCH_CLI: fakeCli, PATH: '' },
-        execFileImpl: () => { throw new Error('unexpected execFile'); },
+        shellOpenImpl: async (u) => { openedUrls.push(u); },
+        execFileImpl: (_file, _args, _opts, cb) => {
+          listCallCount += 1;
+          const accounts = listCallCount <= 1
+            ? [SAMPLE_LIST_PAYLOAD.accounts[0]]
+            : [SAMPLE_LIST_PAYLOAD.accounts[0], SAMPLE_LIST_PAYLOAD.accounts[1]];
+          cb(null, JSON.stringify({ schema_version: 1, current_target: 'app', accounts }), '');
+        },
         spawnImpl: (file, args, opts) => {
-          const child = new EventEmitter();
-          let unrefCalled = false;
-          child.unref = () => { unrefCalled = true; };
-          spawns.push({ file, args, opts, getUnref: () => unrefCalled });
-          setImmediate(() => child.emit('spawn'));
+          const child = makeMockChild();
+          spawns.push({ file, args, opts, child });
+          setTimeout(() => {
+            child.stdout.emit('data', JSON.stringify({ event: 'auth_url', url: sampleAuthUrl }) + '\n');
+          }, 15);
           return child;
         },
       });
 
-      const res = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
-      assert.strictEqual(res.ok, true);
-      assert.strictEqual(res.launched, true);
+      // 1) Start silent add -> receives auth_url with windowsHide=true and shell=false
+      const startRes = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(startRes.ok, true);
+      assert.strictEqual(startRes.state, 'waiting_browser');
+      assert.strictEqual(startRes.authUrl, sampleAuthUrl);
       assert.strictEqual(spawns.length, 1);
-      assert.strictEqual(spawns[0].opts.detached, true);
+      assert.strictEqual(spawns[0].opts.windowsHide, true);
       assert.strictEqual(spawns[0].opts.shell, false);
-      assert.strictEqual(spawns[0].getUnref(), true);
-      if (process.platform === 'win32') {
-        assert.strictEqual(path.resolve(spawns[0].opts.env.AGY_SWITCH_BIN), path.resolve(fakeCli));
-        assert(Array.from(spawns[0].args).includes('Start-Process -FilePath $env:AGY_SWITCH_BIN'));
-      }
+      assert.strictEqual(path.resolve(spawns[0].opts.env.AGY_SWITCH_BIN), path.resolve(fakeCli));
 
-      // Immediate second click hits 2-second cooldown debounce
-      const res2 = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
-      assert.strictEqual(res2.ok, false);
+      // Duplicate add while active reuses existing session (no second spawn)
+      const dupRes = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(dupRes.ok, true);
       assert.strictEqual(spawns.length, 1);
+
+      // Reopen browser opens only the captured trusted Google OAuth URL
+      const openRes = await handlers.get('telemetry:accounts-add-open')(TRUSTED_EVENT);
+      assert.strictEqual(openRes.ok, true);
+      assert.deepStrictEqual(openedUrls, [sampleAuthUrl]);
+
+      // Driver emits success -> status transitions to done with newly added account
+      spawns[0].child.stdout.emit('data', JSON.stringify({ event: 'success' }) + '\n');
+      await new Promise((r) => setTimeout(r, 40));
+      const doneSt = await handlers.get('telemetry:accounts-add-status')(TRUSTED_EVENT);
+      assert.strictEqual(doneSt.active, false);
+      assert.strictEqual(doneSt.state, 'done');
+      assert.strictEqual(doneSt.accounts.length, 2);
+      assert.strictEqual(doneSt.addedLabel, 'beta@example.com');
+      assert(spawns[0].child._writes.some((w) => w.includes('CANCEL')));
+
+      // 2) Start second session and cancel -> sends CANCEL\n and clears active session
+      const start2 = await handlers.get('telemetry:accounts-add')(TRUSTED_EVENT);
+      assert.strictEqual(start2.ok, true);
+      assert.strictEqual(spawns.length, 2);
+      const cancelRes = await handlers.get('telemetry:accounts-add-cancel')(TRUSTED_EVENT);
+      assert.strictEqual(cancelRes.ok, true);
+      assert.strictEqual(cancelRes.cancelled, true);
+      assert(spawns[1].child._writes.some((w) => w.includes('CANCEL')));
+      const idleSt = await handlers.get('telemetry:accounts-add-status')(TRUSTED_EVENT);
+      assert.strictEqual(idleSt.active, false);
+      assert.strictEqual(idleSt.state, 'idle');
     } finally {
       removeDirSafe(tmpHome);
     }

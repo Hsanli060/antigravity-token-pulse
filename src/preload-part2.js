@@ -696,14 +696,49 @@ if (isAccountsView) {
 hideActivityTooltip();
 }
 }
-function stopAccountAddWatch() {
-accountsAddingWatch = false;
-accountsAddWatchDeadline = 0;
-accountsAddBaselineIds = null;
-if (accountsAddWatchTimer) {
-clearInterval(accountsAddWatchTimer);
-accountsAddWatchTimer = null;
+function stopAccountAddFlow(notifyBackend) {
+const wasActive = accountsAddState !== 'idle';
+accountsAddState = 'idle';
+accountsAddAuthUrl = '';
+accountsAddCopied = false;
+if (accountsAddPollTimer) {
+clearInterval(accountsAddPollTimer);
+accountsAddPollTimer = null;
 }
+if (accountsAddCopiedTimer) {
+clearTimeout(accountsAddCopiedTimer);
+accountsAddCopiedTimer = null;
+}
+if (notifyBackend && wasActive && electronObj && electronObj.ipcRenderer && typeof electronObj.ipcRenderer.invoke === 'function') {
+Promise.resolve(electronObj.ipcRenderer.invoke('telemetry:accounts-add-cancel')).catch(() => { });
+}
+}
+function copyTextFallback(text) {
+if (!text) return false;
+try {
+if (g.navigator && g.navigator.clipboard && typeof g.navigator.clipboard.writeText === 'function') {
+Promise.resolve(g.navigator.clipboard.writeText(text)).catch(() => { });
+return true;
+}
+}
+catch { }
+try {
+if (g.document && g.document.body && typeof g.document.createElement === 'function') {
+const ta = g.document.createElement('textarea');
+ta.value = text;
+ta.style.position = 'fixed';
+ta.style.opacity = '0';
+g.document.body.appendChild(ta);
+ta.select();
+if (typeof g.document.execCommand === 'function') {
+g.document.execCommand('copy');
+}
+g.document.body.removeChild(ta);
+return true;
+}
+}
+catch { }
+return false;
 }
 function renderAccountsSection() {
 if (!activityOverlayEl) {
@@ -758,7 +793,7 @@ bestWeek = { pct: pw, who };
 setRoleText('acct-kpi-5h-val', best5h ? `${best5h.pct}%` : '--');
 setRoleText('acct-kpi-5h-sub', best5h ? best5h.who : '点击刷新额度获取', best5h ? `最高可用：${best5h.who} (${best5h.pct}%)` : '');
 setRoleText('acct-kpi-week-val', bestWeek ? `${bestWeek.pct}%` : '--');
-setRoleText('acct-kpi-week-sub', bestWeek ? bestWeek.who : '外部 CLI 隔离驱动', bestWeek ? `最高可用：${bestWeek.who} (${bestWeek.pct}%)` : '');
+setRoleText('acct-kpi-week-sub', bestWeek ? bestWeek.who : '后台静默驱动', bestWeek ? `最高可用：${bestWeek.who} (${bestWeek.pct}%)` : '');
 
 const metaEl = activityOverlayEl.querySelector('[data-role="ta-acct-meta"]');
 const addBtn = activityOverlayEl.querySelector('[data-action="acct-add"]');
@@ -766,6 +801,7 @@ const refreshBtn = activityOverlayEl.querySelector('[data-action="acct-refresh"]
 const noticeEl = activityOverlayEl.querySelector('[data-role="ta-acct-notice"]');
 const listEl = activityOverlayEl.querySelector('[data-role="ta-acct-list"]');
 const anyBusy = Boolean(accountsSwitchingId || accountsDeletingId);
+const isAdding = accountsAddState !== 'idle';
 if (metaEl) {
 let latestTs = 0;
 for (const a of accountsList) {
@@ -779,11 +815,17 @@ metaEl.textContent = accountsLoading
 : `共 ${accountsList.length} 个账号${agoTxt ? ` · ${agoTxt}` : ''}`;
 }
 if (addBtn) {
-addBtn.disabled = anyBusy;
-addBtn.textContent = accountsAddingWatch ? '等待添加中...' : '+ 添加账号';
+addBtn.disabled = anyBusy || accountsAddState === 'starting' || accountsAddState === 'finalizing';
+addBtn.textContent = accountsAddState === 'starting'
+? '正在启动授权...'
+: accountsAddState === 'waiting_browser'
+? '等待浏览器授权...'
+: accountsAddState === 'finalizing'
+? '正在同步账号...'
+: '+ 添加账号';
 }
 if (refreshBtn) {
-refreshBtn.disabled = accountsRefreshing || anyBusy;
+refreshBtn.disabled = accountsRefreshing || anyBusy || isAdding;
 refreshBtn.textContent = accountsRefreshing ? '刷新中...' : '刷新额度';
 }
 if (noticeEl) {
@@ -794,19 +836,29 @@ noticeEl.hidden = false;
 }
 else if (accountsSwitchingId) {
 noticeEl.className = 'agy-ta-acct-notice is-warn';
-const txt = accountsStatusMsg || '正在调用 agy-switch 切换账号并重启 Antigravity 2.0，请勿重复点击...';
+const txt = accountsStatusMsg || '正在后台切换账号并重启 Antigravity 2.0，请勿重复点击...';
 noticeEl.innerHTML = `<span class="agy-ta-acct-notice-text">${escHtml(txt)}</span>`;
 noticeEl.hidden = false;
 }
-else if (accountsAddingWatch) {
+else if (isAdding) {
 noticeEl.className = 'agy-ta-acct-notice is-warn';
-const txt = accountsStatusMsg || '已唤起外部 agy-switch 窗口：选择 [4. 添加账号] → [1. 浏览器一键授权]，完成后将自动同步到本列表';
+const txt = accountsAddState === 'starting'
+? '正在后台准备 Google 授权服务，即将自动打开浏览器...'
+: accountsAddState === 'finalizing'
+? '已收到授权回调，正在静默同步账号与配额...'
+: '已自动打开浏览器，请在浏览器中完成 Google 登录授权（完成后将自动同步）';
+const openBtnHtml = accountsAddAuthUrl
+? `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-sm" data-action="acct-add-open">重新打开浏览器</button>`
+: '';
+const copyBtnHtml = accountsAddAuthUrl
+? `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-sm" data-action="acct-add-copy">${accountsAddCopied ? '已复制 ✓' : '复制链接'}</button>`
+: '';
+const cancelBtnHtml = accountsAddState !== 'finalizing'
+? `<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-sm" data-action="acct-add-cancel">取消</button>`
+: '';
 noticeEl.innerHTML = `
 <span class="agy-ta-acct-notice-text">${escHtml(txt)}</span>
-<span class="agy-ta-acct-notice-actions">
-<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-sm" data-action="acct-sync">立即同步</button>
-<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-sm" data-action="acct-watch-stop">停止等待</button>
-</span>
+<span class="agy-ta-acct-notice-actions">${openBtnHtml}${copyBtnHtml}${cancelBtnHtml}</span>
 `;
 noticeEl.hidden = false;
 }
@@ -831,8 +883,8 @@ return;
 if (accountsList.length === 0) {
 listEl.innerHTML = `
 <div class="agy-ta-empty">
-<div>尚未添加任何账号，点击下方按钮通过外部 agy-switch 授权添加</div>
-<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add"${anyBusy ? ' disabled' : ''}>+ 添加第一个账号</button>
+<div>尚未添加任何账号，点击下方按钮通过浏览器完成 Google 登录授权</div>
+<button type="button" class="agy-ta-acct-btn agy-ta-acct-btn-primary" data-action="acct-add"${(anyBusy || isAdding) ? ' disabled' : ''}>${isAdding ? '等待浏览器授权...' : '+ 添加第一个账号'}</button>
 </div>
 `;
 return;
@@ -971,18 +1023,14 @@ accountsList = [];
 accountsCurrentId = null;
 accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
-stopAccountAddWatch();
+stopAccountAddFlow(false);
 renderActivityModalData();
 return;
 }
 const nextAccounts = Array.isArray(res.accounts) ? res.accounts : [];
 const prevIdsKey = accountsList.map((a) => `${a.id}:${a.lastUpdated}:${a.isCurrent}`).join('|');
 const nextIdsKey = nextAccounts.map((a) => `${a.id}:${a.lastUpdated}:${a.isCurrent}`).join('|');
-let newlyAdded = null;
-if (accountsAddingWatch && accountsAddBaselineIds) {
-newlyAdded = nextAccounts.find((a) => a && !accountsAddBaselineIds.has(a.id)) || null;
-}
-if (watchOnly && !newlyAdded && prevIdsKey === nextIdsKey) {
+if (watchOnly && prevIdsKey === nextIdsKey) {
 return;
 }
 accountsAvailable = true;
@@ -993,12 +1041,7 @@ accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 }
 accountsErrorMsg = typeof res.error === 'string' && res.error ? res.error : '';
-if (newlyAdded) {
-stopAccountAddWatch();
-const addedName = newlyAdded.label || newlyAdded.email || newlyAdded.name || newlyAdded.id;
-accountsStatusMsg = `✓ 已自动同步新账号：${addedName}`;
-}
-else if (forceRemote && res.refreshed && res.refreshSummary) {
+if (forceRemote && res.refreshed && res.refreshSummary) {
 const s = res.refreshSummary;
 accountsStatusMsg = `已刷新 ${Number(s.success) || 0}/${Number(s.total) || accountsList.length} 个账号额度${Number(s.failed) > 0 ? `（${Number(s.failed)} 个失败）` : ''}`;
 }
@@ -1017,8 +1060,108 @@ renderAccountsSection();
 }
 }
 }
+let accountsAddPollBusy = false;
+async function pollAccountAddStatus() {
+if (!activityModalOpen || accountsAddState === 'idle' || accountsAddPollBusy) {
+return;
+}
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+stopAccountAddFlow(false);
+return;
+}
+accountsAddPollBusy = true;
+try {
+const st = await electronObj.ipcRenderer.invoke('telemetry:accounts-add-status');
+if (!activityModalOpen || accountsAddState === 'idle') {
+return;
+}
+if (!st || typeof st !== 'object') {
+return;
+}
+if (st.state === 'done') {
+stopAccountAddFlow(false);
+if (Array.isArray(st.accounts)) {
+accountsList = st.accounts;
+accountsCurrentId = typeof st.currentId === 'string' ? st.currentId : null;
+}
+accountsErrorMsg = typeof st.error === 'string' && st.error ? st.error : '';
+accountsStatusMsg = st.addedLabel
+? `✓ 已成功添加账号：${st.addedLabel}`
+: '✓ 账号添加并同步成功';
+renderActivityModalData();
+renderAccountsSection();
+return;
+}
+if (st.state === 'error') {
+stopAccountAddFlow(false);
+accountsStatusMsg = '';
+accountsErrorMsg = (typeof st.error === 'string' && st.error) ? st.error : '添加账号失败，请重试';
+renderAccountsSection();
+return;
+}
+if (st.state === 'cancelled' || !st.active) {
+stopAccountAddFlow(false);
+accountsStatusMsg = '';
+renderAccountsSection();
+return;
+}
+const nextState = st.state === 'finalizing' ? 'finalizing' : (st.state === 'waiting_browser' ? 'waiting_browser' : 'starting');
+const nextUrl = typeof st.authUrl === 'string' && st.authUrl ? st.authUrl : accountsAddAuthUrl;
+if (nextState !== accountsAddState || nextUrl !== accountsAddAuthUrl) {
+accountsAddState = nextState;
+accountsAddAuthUrl = nextUrl;
+renderAccountsSection();
+}
+}
+catch { }
+finally {
+accountsAddPollBusy = false;
+}
+}
+async function openAccountAddBrowser() {
+if (!activityModalOpen || !accountsAddAuthUrl) {
+return;
+}
+if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
+return;
+}
+try {
+const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-add-open');
+if (activityModalOpen && res && !res.ok && res.error) {
+accountsErrorMsg = res.error;
+renderAccountsSection();
+}
+}
+catch { }
+}
+function copyAccountAddUrl() {
+if (!activityModalOpen || !accountsAddAuthUrl) {
+return;
+}
+if (copyTextFallback(accountsAddAuthUrl)) {
+accountsAddCopied = true;
+if (accountsAddCopiedTimer) {
+clearTimeout(accountsAddCopiedTimer);
+}
+accountsAddCopiedTimer = setTimeout(() => {
+accountsAddCopiedTimer = null;
+accountsAddCopied = false;
+if (activityModalOpen && accountsAddState !== 'idle') {
+renderAccountsSection();
+}
+}, 1800);
+renderAccountsSection();
+}
+}
 async function triggerAccountAdd() {
 if (!activityModalOpen || accountsSwitchingId || accountsDeletingId) {
+return;
+}
+if (accountsAddState === 'waiting_browser' && accountsAddAuthUrl) {
+await openAccountAddBrowser();
+return;
+}
+if (accountsAddState !== 'idle') {
 return;
 }
 if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
@@ -1027,43 +1170,46 @@ return;
 accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 accountsErrorMsg = '';
+accountsStatusMsg = '';
+accountsAddState = 'starting';
+accountsAddAuthUrl = '';
+accountsAddCopied = false;
+renderAccountsSection();
 try {
 const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-add');
 if (!activityModalOpen) {
+stopAccountAddFlow(true);
 return;
 }
 if (!res || !res.ok) {
-accountsErrorMsg = (res && typeof res.error === 'string' && res.error) ? res.error : '无法打开外部 agy-switch 窗口';
+stopAccountAddFlow(false);
+if (!res || !res.cancelled) {
+accountsErrorMsg = (res && typeof res.error === 'string' && res.error) ? res.error : '后台静默启动 Google 授权失败';
+}
 renderAccountsSection();
 return;
 }
-stopAccountAddWatch();
-accountsAddBaselineIds = new Set(accountsList.map((a) => a && a.id).filter(Boolean));
-accountsAddingWatch = true;
-accountsAddWatchDeadline = Date.now() + 180000;
-accountsStatusMsg = '已唤起外部 agy-switch 窗口：选择 [4. 添加账号] → [1. 浏览器一键授权]，完成后将自动同步到本列表';
-accountsAddWatchTimer = setInterval(() => {
-if (!activityModalOpen || !accountsAddingWatch) {
-stopAccountAddWatch();
+if (res.state === 'done') {
+stopAccountAddFlow(false);
+await refreshAccountsList(false);
 return;
 }
-if (Date.now() > accountsAddWatchDeadline) {
-stopAccountAddWatch();
-accountsStatusMsg = '自动监听已超时，若已完成授权请点击“刷新额度”或重新切回本标签页同步';
-renderAccountsSection();
-return;
+accountsAddState = res.state === 'finalizing' ? 'finalizing' : (res.state === 'waiting_browser' ? 'waiting_browser' : 'starting');
+accountsAddAuthUrl = typeof res.authUrl === 'string' ? res.authUrl : '';
+if (accountsAddPollTimer) {
+clearInterval(accountsAddPollTimer);
 }
-if (!accountsSwitchingId && !accountsDeletingId && !accountsRefreshing) {
-void refreshAccountsList(false, { watchOnly: true });
-}
-}, 2500);
+accountsAddPollTimer = setInterval(() => {
+void pollAccountAddStatus();
+}, 800);
 renderAccountsSection();
 }
 catch {
 if (!activityModalOpen) {
 return;
 }
-accountsErrorMsg = '启动外部 agy-switch 添加窗口失败';
+stopAccountAddFlow(false);
+accountsErrorMsg = '启动后台静默授权失败，请重试';
 renderAccountsSection();
 }
 }
@@ -1074,6 +1220,7 @@ return;
 if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
 return;
 }
+stopAccountAddFlow(true);
 const targetObj = accountsList.find((a) => a && a.id === accountId) || null;
 const targetLabel = targetObj ? (targetObj.label || targetObj.email || targetObj.name || targetObj.id) : accountId;
 accountsPendingConfirmId = null;
@@ -1120,12 +1267,12 @@ return;
 if (!electronObj || !electronObj.ipcRenderer || typeof electronObj.ipcRenderer.invoke !== 'function') {
 return;
 }
-stopAccountAddWatch();
+stopAccountAddFlow(true);
 accountsPendingConfirmId = null;
 accountsPendingConfirmType = null;
 accountsSwitchingId = accountId;
 accountsErrorMsg = '';
-accountsStatusMsg = '正在调用 agy-switch 切换账号并重启 Antigravity 2.0（同时同步 agy CLI），请稍候...';
+accountsStatusMsg = '正在后台静默切换账号并重启 Antigravity 2.0（同时同步 agy CLI），请稍候...';
 renderAccountsSection();
 try {
 const res = await electronObj.ipcRenderer.invoke('telemetry:accounts-switch', accountId);
@@ -1263,7 +1410,7 @@ accountsDeletingId = null;
 accountsRefreshing = false;
 accountsErrorMsg = '';
 accountsStatusMsg = '';
-stopAccountAddWatch();
+stopAccountAddFlow(true);
 if (accountsSwitchFallbackTimer) {
 clearTimeout(accountsSwitchFallbackTimer);
 accountsSwitchFallbackTimer = null;
@@ -1291,7 +1438,7 @@ setPortalOverlayOpenSafe(false);
 }
 function handleBeforeUnload() {
 try {
-stopAccountAddWatch();
+stopAccountAddFlow(true);
 if (accountsSwitchFallbackTimer) {
 clearTimeout(accountsSwitchFallbackTimer);
 accountsSwitchFallbackTimer = null;
@@ -1434,7 +1581,7 @@ overlay.innerHTML = `
 <div class="agy-ta-kpi">
 <div class="agy-ta-kpi-label"><span class="agy-ta-ellipsis">最高可用 Gemini 周额度</span></div>
 <div class="agy-ta-kpi-val" data-role="acct-kpi-week-val">--</div>
-<div class="agy-ta-kpi-sub" data-role="acct-kpi-week-sub">外部 CLI 隔离驱动</div>
+<div class="agy-ta-kpi-sub" data-role="acct-kpi-week-sub">后台静默驱动</div>
 </div>
 </div>
 <div class="agy-ta-acct-panel">
@@ -1451,7 +1598,7 @@ overlay.innerHTML = `
 <div class="agy-ta-acct-notice" data-role="ta-acct-notice" hidden></div>
 <div class="agy-ta-acct-list" data-role="ta-acct-list"></div>
 <div class="agy-ta-acct-foot">
-<span class="agy-ta-ellipsis">后端引擎：外部独立 agy-switch CLI（与 Antigravity 2.0 进程隔离）</span>
+<span class="agy-ta-ellipsis">后端引擎：agy-switch 后台静默驱动（与 Antigravity 2.0 进程隔离）</span>
 <span class="agy-ta-acct-foot-right">切换将自动重启客户端并同步 agy CLI</span>
 </div>
 </div>
@@ -1520,12 +1667,16 @@ const action = actionEl.getAttribute('data-action');
 if (action === 'acct-add') {
 void triggerAccountAdd();
 }
-else if (action === 'acct-sync') {
-void refreshAccountsList(false);
+else if (action === 'acct-add-open') {
+void openAccountAddBrowser();
 }
-else if (action === 'acct-watch-stop') {
-stopAccountAddWatch();
+else if (action === 'acct-add-copy') {
+copyAccountAddUrl();
+}
+else if (action === 'acct-add-cancel') {
+stopAccountAddFlow(true);
 accountsStatusMsg = '';
+accountsErrorMsg = '';
 renderAccountsSection();
 }
 else if (action === 'acct-refresh') {
@@ -1620,7 +1771,14 @@ closeActivityModal();
 };
 g.document.addEventListener('keydown', activityEscapeHandler, true);
 activityFocusHandler = () => {
-if (activityModalOpen && accountsAvailable && activityActiveTab === 'accounts' && !accountsSwitchingId && !accountsDeletingId && !accountsRefreshing) {
+if (!activityModalOpen || !accountsAvailable || activityActiveTab !== 'accounts') {
+return;
+}
+if (accountsAddState !== 'idle') {
+void pollAccountAddStatus();
+return;
+}
+if (!accountsSwitchingId && !accountsDeletingId && !accountsRefreshing) {
 void refreshAccountsList(false, { watchOnly: true });
 }
 };

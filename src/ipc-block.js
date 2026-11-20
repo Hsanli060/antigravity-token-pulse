@@ -764,7 +764,7 @@ const SWITCH_CLI_CONFIG_FILE = 'telemetry-switch-cli.json';
 let accountsRefreshInFlight = null;
 let accountsSwitchInFlight = false;
 let accountsDeleteInFlight = false;
-let accountsAddCooldownUntil = 0;
+let activeAddSession = null;
 
 function isTrustedLocalSender(event) {
   try {
@@ -1181,6 +1181,12 @@ electronMain.handle('telemetry:accounts-switch', async (event, accountId) => {
   if (accountsSwitchInFlight) {
     return { ok: false, error: '正在执行账号切换，请稍候' };
   }
+  if (activeAddSession) {
+    const prevAdd = activeAddSession;
+    activeAddSession = null;
+    prevAdd.state = 'cancelled';
+    terminateAddSession(prevAdd);
+  }
   const cliPath = resolveSwitchCliPath();
   if (!cliPath) {
     return { ok: false, error: '未检测到 agy-switch CLI' };
@@ -1272,94 +1278,441 @@ function isSwitchLockBusy(dataDir) {
   }
 }
 
-function findUnixTerminalCommand(cliPath) {
-  if (process.platform === 'darwin') {
-    return { cmd: 'open', args: ['-a', 'Terminal', cliPath] };
-  }
-  const candidates = [
-    { name: 'x-terminal-emulator', args: ['-e', cliPath] },
-    { name: 'gnome-terminal', args: ['--', cliPath] },
-    { name: 'konsole', args: ['-e', cliPath] },
-    { name: 'xfce4-terminal', args: ['-e', cliPath] },
-    { name: 'alacritty', args: ['-e', cliPath] },
-    { name: 'kitty', args: [cliPath] },
-    { name: 'xterm', args: ['-e', cliPath] },
-  ];
-  const rawPathEnv = typeof process.env.PATH === 'string' ? process.env.PATH : '';
-  const dirs = rawPathEnv.split(pathTelemetry.delimiter).map((d) => d.trim()).filter(Boolean);
-  for (const item of candidates) {
-    for (const dir of dirs) {
-      const full = pathTelemetry.join(dir, item.name);
-      try {
-        if (fsTelemetry.statSync(full).isFile()) {
-          return { cmd: full, args: item.args };
-        }
-      } catch {}
+const SILENT_GOOGLE_AUTH_URL_RE = /^https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?[^\s\u0000-\u001f\u007f]+$/;
+
+const SILENT_WIN_CONPTY_CS = String.raw`
+using System;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class AgySilentAddDriver {
+    const uint PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016;
+    const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+    const int STARTF_USESTDHANDLES = 0x00000100;
+    static volatile bool _cancelled = false;
+
+    [StructLayout(LayoutKind.Sequential)] struct COORD { public short X; public short Y; }
+    [StructLayout(LayoutKind.Sequential)] struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct STARTUPINFO {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
     }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CreatePipe(out SafeFileHandle hReadPipe, out SafeFileHandle hWritePipe, ref SECURITY_ATTRIBUTES lpPipeAttributes, int nSize);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern int CreatePseudoConsole(COORD size, SafeFileHandle hInput, SafeFileHandle hOutput, uint dwFlags, out IntPtr phPC);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern void ClosePseudoConsole(IntPtr hPC);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessW(string lpApplicationName, StringBuilder lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFOEX lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr hObject);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    static void Emit(string json) {
+        Console.WriteLine(json);
+        Console.Out.Flush();
+    }
+
+    static string JsonEscape(string s) {
+        if (s == null) return "";
+        return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
+    }
+
+    public static void Run(string exePath) {
+        _cancelled = false;
+        SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)), bInheritHandle = 0 };
+        SafeFileHandle ptyInRead, ptyInWrite, ptyOutRead, ptyOutWrite;
+        if (!CreatePipe(out ptyInRead, out ptyInWrite, ref sa, 0)) throw new Exception("CreatePipe in failed");
+        if (!CreatePipe(out ptyOutRead, out ptyOutWrite, ref sa, 0)) throw new Exception("CreatePipe out failed");
+
+        IntPtr hPC;
+        int hr = CreatePseudoConsole(new COORD { X = 512, Y = 36 }, ptyInRead, ptyOutWrite, 0, out hPC);
+        if (hr != 0) throw new Exception("CreatePseudoConsole failed: 0x" + hr.ToString("X"));
+        ptyInRead.Dispose();
+        ptyOutWrite.Dispose();
+
+        IntPtr attrSize = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attrSize);
+        IntPtr attrList = Marshal.AllocHGlobal(attrSize);
+        if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref attrSize)) throw new Exception("InitAttr failed");
+        if (!UpdateProcThreadAttribute(attrList, 0, (IntPtr)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hPC, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) throw new Exception("UpdateAttr failed");
+
+        STARTUPINFOEX si = new STARTUPINFOEX();
+        si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.lpAttributeList = attrList;
+
+        PROCESS_INFORMATION pi;
+        StringBuilder cmd = new StringBuilder("\"" + exePath + "\"");
+        bool ok = CreateProcessW(exePath, cmd, IntPtr.Zero, IntPtr.Zero, false, EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, null, ref si, out pi);
+        DeleteProcThreadAttributeList(attrList);
+        Marshal.FreeHGlobal(attrList);
+        if (!ok) {
+            ClosePseudoConsole(hPC);
+            throw new Exception("CreateProcessW failed: " + Marshal.GetLastWin32Error());
+        }
+
+        var stdinThread = new Thread(() => {
+            try {
+                string line;
+                while ((line = Console.ReadLine()) != null) {
+                    if (line.Trim().Equals("CANCEL", StringComparison.OrdinalIgnoreCase)) {
+                        _cancelled = true;
+                        break;
+                    }
+                }
+                _cancelled = true;
+            } catch { _cancelled = true; }
+        });
+        stdinThread.IsBackground = true;
+        stdinThread.Start();
+
+        var outStream = new FileStream(ptyOutRead, FileAccess.Read);
+        var inStream = new FileStream(ptyInWrite, FileAccess.Write);
+        var sb = new StringBuilder();
+        var readerThread = new Thread(() => {
+            byte[] buf = new byte[4096];
+            try {
+                int n;
+                while ((n = outStream.Read(buf, 0, buf.Length)) > 0) {
+                    string chunk = Encoding.UTF8.GetString(buf, 0, n);
+                    lock (sb) { sb.Append(chunk); }
+                }
+            } catch {}
+        });
+        readerThread.IsBackground = true;
+        readerThread.Start();
+
+        try {
+            bool sent4 = false;
+            bool sent1 = false;
+            bool sentUrl = false;
+            var ansiRe = new Regex(@"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)");
+            var urlRe = new Regex(@"https://accounts\.google\.com/o/oauth2/v2/auth\?[^\s\x00-\x1f\x7f]+");
+            var deadline = DateTime.UtcNow.AddSeconds(310);
+            while (!_cancelled && DateTime.UtcNow < deadline) {
+                string cur;
+                lock (sb) { cur = sb.ToString(); }
+                string plain = ansiRe.Replace(cur, "");
+                if (!sent4 && (plain.Contains("添加账号") || plain.Contains("Add Account"))) {
+                    byte[] b = Encoding.ASCII.GetBytes("4");
+                    inStream.Write(b, 0, b.Length);
+                    inStream.Flush();
+                    sent4 = true;
+                } else if (sent4 && !sent1 && (plain.Contains("浏览器一键授权") || plain.Contains("Browser authorization"))) {
+                    byte[] b = Encoding.ASCII.GetBytes("1");
+                    inStream.Write(b, 0, b.Length);
+                    inStream.Flush();
+                    sent1 = true;
+                } else if (sent1) {
+                    if (!sentUrl && (plain.Contains("等待浏览器授权") || plain.Contains("Waiting for browser"))) {
+                        var m = urlRe.Match(plain);
+                        if (m.Success && m.Value.Contains("state=")) {
+                            sentUrl = true;
+                            Emit("{\"event\":\"auth_url\",\"url\":\"" + JsonEscape(m.Value) + "\"}");
+                        }
+                    }
+                    if (plain.Contains("账号添加成功") || plain.Contains("Account added successfully")) {
+                        Thread.Sleep(80);
+                        Emit("{\"event\":\"success\"}");
+                        break;
+                    }
+                    if (plain.Contains("无法启动授权服务") || plain.Contains("Could not start authorization")) {
+                        Emit("{\"event\":\"error\",\"message\":\"无法启动本地授权服务，请检查网络代理后重试\"}");
+                        break;
+                    }
+                    if (plain.Contains("授权未完成") || plain.Contains("Authorization did not complete")) {
+                        Emit("{\"event\":\"error\",\"message\":\"浏览器授权未完成或已超时，请重试\"}");
+                        break;
+                    }
+                    if (plain.Contains("未能获取到 Refresh Token") || plain.Contains("Failed to obtain Refresh Token")) {
+                        Emit("{\"event\":\"error\",\"message\":\"未能获取到 Refresh Token，请先撤销旧授权后重试\"}");
+                        break;
+                    }
+                    if (plain.Contains("无法添加账号") || plain.Contains("Could not add the account")) {
+                        Emit("{\"event\":\"error\",\"message\":\"授权回调后添加账号失败，请检查网络代理后重试\"}");
+                        break;
+                    }
+                }
+                if (WaitForSingleObject(pi.hProcess, 0) == 0) break;
+                Thread.Sleep(40);
+            }
+            if (_cancelled) Emit("{\"event\":\"cancelled\"}");
+        } finally {
+            try { TerminateProcess(pi.hProcess, 0); } catch {}
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            ClosePseudoConsole(hPC);
+            try { inStream.Dispose(); } catch {}
+            try { outStream.Dispose(); } catch {}
+        }
+    }
+}
+`;
+
+const SILENT_UNIX_PTY_PY = String.raw`
+import json, os, pty, re, select, signal, subprocess, sys, time
+exe = os.environ.get('AGY_SWITCH_BIN', '')
+master, slave = pty.openpty()
+proc = subprocess.Popen([exe], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+buf = ''
+sent4 = False
+sent1 = False
+sent_url = False
+ansi_re = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+url_re = re.compile(r'https://accounts\.google\.com/o/oauth2/v2/auth\?[^\s\x00-\x1f\x7f]+')
+deadline = time.time() + 310
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + '\n')
+    sys.stdout.flush()
+try:
+    while time.time() < deadline:
+        rlist, _, _ = select.select([master, sys.stdin], [], [], 0.05)
+        if sys.stdin in rlist:
+            line = sys.stdin.readline()
+            if not line or line.strip().upper() == 'CANCEL':
+                emit({'event': 'cancelled'})
+                break
+        if master in rlist:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data.decode('utf-8', errors='ignore')
+            plain = ansi_re.sub('', buf)
+            if not sent4 and ('添加账号' in plain or 'Add Account' in plain):
+                os.write(master, b'4')
+                sent4 = True
+            elif sent4 and not sent1 and ('浏览器一键授权' in plain or 'Browser authorization' in plain):
+                os.write(master, b'1')
+                sent1 = True
+            elif sent1:
+                if not sent_url and ('等待浏览器授权' in plain or 'Waiting for browser' in plain):
+                    m = url_re.search(plain)
+                    if m and 'state=' in m.group(0):
+                        sent_url = True
+                        emit({'event': 'auth_url', 'url': m.group(0)})
+                if '账号添加成功' in plain or 'Account added successfully' in plain:
+                    time.sleep(0.08)
+                    emit({'event': 'success'})
+                    break
+                if '无法启动授权服务' in plain or 'Could not start authorization' in plain:
+                    emit({'event': 'error', 'message': '无法启动本地授权服务，请检查网络代理后重试'})
+                    break
+                if '授权未完成' in plain or 'Authorization did not complete' in plain:
+                    emit({'event': 'error', 'message': '浏览器授权未完成或已超时，请重试'})
+                    break
+                if '未能获取到 Refresh Token' in plain or 'Failed to obtain Refresh Token' in plain:
+                    emit({'event': 'error', 'message': '未能获取到 Refresh Token，请先撤销旧授权后重试'})
+                    break
+                if '无法添加账号' in plain or 'Could not add the account' in plain:
+                    emit({'event': 'error', 'message': '授权回调后添加账号失败，请检查网络代理后重试'})
+                    break
+        if proc.poll() is not None:
+            break
+finally:
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                proc.kill()
+    except Exception:
+        pass
+    try:
+        os.close(master)
+    except Exception:
+        pass
+`;
+
+function terminateAddSession(session) {
+  if (!session) return;
+  if (session.timeoutTimer) {
+    clearTimeout(session.timeoutTimer);
+    session.timeoutTimer = null;
   }
-  return null;
+  const child = session.child;
+  session.child = null;
+  if (!child) return;
+  try {
+    if (child.stdin && !child.stdin.destroyed) {
+      child.stdin.write('CANCEL\n');
+      child.stdin.end();
+    }
+  } catch {}
+  const killTimer = setTimeout(() => {
+    try {
+      if (!child.killed) {
+        child.kill();
+      }
+    } catch {}
+  }, 500);
+  if (killTimer && typeof killTimer.unref === 'function') {
+    killTimer.unref();
+  }
 }
 
-function spawnInteractiveSwitchCli(cliPath) {
-  return new Promise((resolve) => {
-    try {
-      let launchCmd = '';
-      let launchArgs = [];
-      let launchEnv = process.env;
-      let hideLauncher = true;
+function getElectronShellSafe() {
+  try {
+    if (typeof electron_1 !== 'undefined' && electron_1.shell) {
+      return electron_1.shell;
+    }
+    return require('electron').shell || null;
+  } catch {
+    return null;
+  }
+}
 
-      if (process.platform === 'win32') {
-        const sysRoot = typeof process.env.SystemRoot === 'string' ? process.env.SystemRoot.trim() : '';
-        const psCandidate = sysRoot
-          ? pathTelemetry.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-          : '';
-        launchCmd = psCandidate && fsTelemetry.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
-        launchArgs = [
-          '-NoProfile',
-          '-NonInteractive',
-          '-WindowStyle',
-          'Hidden',
-          '-Command',
-          'Start-Process -FilePath $env:AGY_SWITCH_BIN',
-        ];
-        launchEnv = { ...process.env, AGY_SWITCH_BIN: cliPath };
-        hideLauncher = true;
-      } else {
-        const unixTerm = findUnixTerminalCommand(cliPath);
-        if (!unixTerm) {
-          resolve({ ok: false, error: '未找到可用的系统终端，请手动在终端运行 agy-switch 添加账号' });
-          return;
-        }
-        launchCmd = unixTerm.cmd;
-        launchArgs = unixTerm.args;
-        hideLauncher = false;
+function startSilentAddSession(cliPath, baselineIds) {
+  let cmd = '';
+  let args = [];
+  let env = { ...process.env, AGY_SWITCH_BIN: cliPath };
+  if (process.platform === 'win32') {
+    const sysRoot = typeof process.env.SystemRoot === 'string' ? process.env.SystemRoot.trim() : '';
+    const psCandidate = sysRoot
+      ? pathTelemetry.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : '';
+    cmd = psCandidate && fsTelemetry.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
+    const psCmd = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AGY_SWITCH_CS_B64)); Add-Type -TypeDefinition $s -Language CSharp; [AgySilentAddDriver]::Run($env:AGY_SWITCH_BIN)";
+    args = ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psCmd];
+    env.AGY_SWITCH_CS_B64 = Buffer.from(SILENT_WIN_CONPTY_CS, 'utf8').toString('base64');
+  } else {
+    cmd = 'python3';
+    args = ['-u', '-c', SILENT_UNIX_PTY_PY];
+  }
+
+  let child;
+  try {
+    child = childProcessTelemetry.spawn(cmd, args, {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    });
+  } catch {
+    return null;
+  }
+
+  const session = {
+    cliPath,
+    child,
+    state: 'starting', // 'starting' | 'waiting_browser' | 'finalizing' | 'done' | 'error' | 'cancelled'
+    authUrl: '',
+    error: '',
+    addedLabel: '',
+    accounts: null,
+    currentId: null,
+    baselineIds: new Set(baselineIds || []),
+    startedAt: Date.now(),
+    timeoutTimer: null,
+    readyWaiters: [],
+  };
+
+  const notifyReady = () => {
+    const waiters = session.readyWaiters.splice(0, session.readyWaiters.length);
+    for (const fn of waiters) {
+      try { fn(); } catch {}
+    }
+  };
+
+  let lineBuf = '';
+  const handleDriverEvent = async (evt) => {
+    if (!evt || typeof evt !== 'object') return;
+    if (evt.event === 'auth_url' && typeof evt.url === 'string' && SILENT_GOOGLE_AUTH_URL_RE.test(evt.url.trim())) {
+      session.authUrl = evt.url.trim();
+      if (session.state === 'starting') {
+        session.state = 'waiting_browser';
       }
+      notifyReady();
+    } else if (evt.event === 'success') {
+      if (session.state === 'done' || session.state === 'finalizing' || session.state === 'cancelled') return;
+      session.state = 'finalizing';
+      terminateAddSession(session);
+      const listRes = await fetchSanitizedAccountsList(cliPath);
+      const nextAccounts = Array.isArray(listRes.accounts) ? listRes.accounts : [];
+      const addedObj = nextAccounts.find((a) => a && !session.baselineIds.has(a.id)) || null;
+      session.accounts = nextAccounts;
+      session.currentId = listRes.currentId || null;
+      session.addedLabel = addedObj ? (addedObj.label || addedObj.email || addedObj.name || addedObj.id) : '';
+      session.error = listRes.error || '';
+      session.state = 'done';
+      notifyReady();
+    } else if (evt.event === 'error') {
+      if (session.state === 'done' || session.state === 'finalizing' || session.state === 'cancelled') return;
+      session.state = 'error';
+      session.error = sanitizeSafeText(evt.message, 180) || '后台授权添加账号失败，请重试';
+      terminateAddSession(session);
+      notifyReady();
+    } else if (evt.event === 'cancelled') {
+      if (session.state !== 'done' && session.state !== 'finalizing' && session.state !== 'error') {
+        session.state = 'cancelled';
+      }
+      notifyReady();
+    }
+  };
 
-      const child = childProcessTelemetry.spawn(launchCmd, launchArgs, {
-        env: launchEnv,
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: hideLauncher,
-        shell: false,
-      });
-      let settled = false;
-      child.once('error', () => {
-        if (!settled) {
-          settled = true;
-          resolve({ ok: false, error: '无法打开外部 agy-switch 终端窗口' });
-        }
-      });
-      child.once('spawn', () => {
-        if (!settled) {
-          settled = true;
-          try { child.unref(); } catch {}
-          resolve({ ok: true, launched: true });
-        }
-      });
-    } catch {
-      resolve({ ok: false, error: '启动外部 agy-switch 窗口失败' });
+  if (child.stdout) {
+    child.stdout.on('data', (chunk) => {
+      lineBuf += String(chunk || '');
+      const lines = lineBuf.split(/\r?\n/);
+      lineBuf = lines.pop() || '';
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed || !trimmed.startsWith('{')) continue;
+        try {
+          void handleDriverEvent(JSON.parse(trimmed));
+        } catch {}
+      }
+    });
+  }
+
+  child.once('error', () => {
+    if (session.state === 'starting' || session.state === 'waiting_browser') {
+      session.state = 'error';
+      session.error = '无法启动后台静默授权进程，请确认系统环境正常';
+      terminateAddSession(session);
+      notifyReady();
     }
   });
+
+  child.once('close', () => {
+    if (session.timeoutTimer) {
+      clearTimeout(session.timeoutTimer);
+      session.timeoutTimer = null;
+    }
+    session.child = null;
+    if (session.state === 'starting' || session.state === 'waiting_browser') {
+      session.state = 'error';
+      session.error = '后台授权流程已中断，请重试';
+      notifyReady();
+    }
+  });
+
+  session.timeoutTimer = setTimeout(() => {
+    if (session.state === 'starting' || session.state === 'waiting_browser') {
+      session.state = 'error';
+      session.error = '浏览器授权超时，请重新点击添加账号';
+      terminateAddSession(session);
+      notifyReady();
+    }
+  }, 315000);
+  if (session.timeoutTimer && typeof session.timeoutTimer.unref === 'function') {
+    session.timeoutTimer.unref();
+  }
+
+  return session;
 }
 
 electronMain.removeHandler?.('telemetry:accounts-add');
@@ -1367,20 +1720,135 @@ electronMain.handle('telemetry:accounts-add', async (event) => {
   if (!isTrustedLocalSender(event)) {
     return { ok: false, error: '拒绝非本地来源请求' };
   }
-  const now = Date.now();
-  if (now < accountsAddCooldownUntil) {
-    return { ok: false, error: '已正在打开外部 agy-switch 窗口，请勿重复点击' };
+  if (accountsSwitchInFlight || accountsDeleteInFlight) {
+    return { ok: false, error: '当前正在执行账号操作，请稍后再添加' };
+  }
+  if (activeAddSession && (activeAddSession.state === 'starting' || activeAddSession.state === 'waiting_browser' || activeAddSession.state === 'finalizing')) {
+    return {
+      ok: true,
+      state: activeAddSession.state,
+      authUrl: activeAddSession.authUrl || '',
+      startedAt: activeAddSession.startedAt,
+    };
   }
   const cliPath = resolveSwitchCliPath();
   if (!cliPath || !isValidSwitchCliBinary(cliPath)) {
     return { ok: false, error: '未检测到 agy-switch CLI' };
   }
-  accountsAddCooldownUntil = now + 2000;
-  const res = await spawnInteractiveSwitchCli(cliPath);
-  if (!res || !res.ok) {
-    accountsAddCooldownUntil = 0;
+  const curList = await fetchSanitizedAccountsList(cliPath);
+  const baselineIds = (curList.accounts || []).map((a) => a && a.id).filter(Boolean);
+  const session = startSilentAddSession(cliPath, baselineIds);
+  if (!session) {
+    return { ok: false, error: '无法启动后台静默授权进程' };
   }
-  return res;
+  activeAddSession = session;
+
+  await new Promise((resolve) => {
+    if (session.state !== 'starting') {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, 6000);
+    if (timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    session.readyWaiters.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+
+  if (session.state === 'error') {
+    const err = session.error || '后台授权启动失败';
+    if (activeAddSession === session) {
+      activeAddSession = null;
+    }
+    return { ok: false, error: err };
+  }
+  if (session.state === 'cancelled') {
+    if (activeAddSession === session) {
+      activeAddSession = null;
+    }
+    return { ok: false, cancelled: true, error: '' };
+  }
+  return {
+    ok: true,
+    state: session.state,
+    authUrl: session.authUrl || '',
+    startedAt: session.startedAt,
+  };
+});
+
+electronMain.removeHandler?.('telemetry:accounts-add-status');
+electronMain.handle('telemetry:accounts-add-status', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { active: false, state: 'idle' };
+  }
+  const s = activeAddSession;
+  if (!s) {
+    return { active: false, state: 'idle' };
+  }
+  if (s.state === 'done') {
+    activeAddSession = null;
+    return {
+      active: false,
+      state: 'done',
+      addedLabel: s.addedLabel || '',
+      accounts: s.accounts || [],
+      currentId: s.currentId || null,
+      error: s.error || null,
+    };
+  }
+  if (s.state === 'error') {
+    const err = s.error || '添加账号失败';
+    activeAddSession = null;
+    return { active: false, state: 'error', error: err };
+  }
+  if (s.state === 'cancelled') {
+    activeAddSession = null;
+    return { active: false, state: 'cancelled' };
+  }
+  return {
+    active: true,
+    state: s.state,
+    authUrl: s.authUrl || '',
+    startedAt: s.startedAt,
+  };
+});
+
+electronMain.removeHandler?.('telemetry:accounts-add-cancel');
+electronMain.handle('telemetry:accounts-add-cancel', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false };
+  }
+  const s = activeAddSession;
+  activeAddSession = null;
+  if (s) {
+    s.state = 'cancelled';
+    terminateAddSession(s);
+  }
+  return { ok: true, cancelled: true };
+});
+
+electronMain.removeHandler?.('telemetry:accounts-add-open');
+electronMain.handle('telemetry:accounts-add-open', async (event) => {
+  if (!isTrustedLocalSender(event)) {
+    return { ok: false, error: '拒绝非本地来源请求' };
+  }
+  const s = activeAddSession;
+  if (!s || !s.authUrl || !SILENT_GOOGLE_AUTH_URL_RE.test(s.authUrl)) {
+    return { ok: false, error: '当前没有进行中的授权链接' };
+  }
+  const shellObj = getElectronShellSafe();
+  if (!shellObj || typeof shellObj.openExternal !== 'function') {
+    return { ok: false, error: '无法调起系统浏览器，请使用复制链接手动打开' };
+  }
+  try {
+    await shellObj.openExternal(s.authUrl);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: '打开浏览器失败，请复制授权链接手动访问' };
+  }
 });
 
 electronMain.removeHandler?.('telemetry:accounts-delete');
@@ -1397,6 +1865,12 @@ electronMain.handle('telemetry:accounts-delete', async (event, accountId) => {
   }
   if (accountsDeleteInFlight) {
     return { ok: false, error: '正在删除其他账号，请稍候' };
+  }
+  if (activeAddSession) {
+    const prevAdd = activeAddSession;
+    activeAddSession = null;
+    prevAdd.state = 'cancelled';
+    terminateAddSession(prevAdd);
   }
   const cliPath = resolveSwitchCliPath();
   if (!cliPath) {
